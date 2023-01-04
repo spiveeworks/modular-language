@@ -163,7 +163,12 @@ struct token get_token(struct tokenizer *tk) {
 
         result.id = TOKEN_ALPHANUM; /* Default value. */
         for (int i = 0; i < ARRAY_LENGTH(keywords); i++) {
-            if (strncmp(keywords[i], result.it.data, result.it.length) == 0) {
+            int cmp = strncmp(
+                keywords[i].cstr,
+                result.it.data,
+                result.it.length
+            );
+            if (cmp == 0) {
                 result.id = keywords[i].id;
                 break;
             }
@@ -274,7 +279,6 @@ struct partial_operation {
     struct ref arg;
     enum token_id op;
     enum precedence_level precedence;
-    enum token_id close_token;
 };
 
 struct op_stack {
@@ -297,6 +301,12 @@ struct op_stack {
     bool have_next_op;
     enum token_id next_op;
     enum precedence_level next_precedence;
+
+    /* Represents a closing bracket or semicolon that will pop results until
+       either an opening bracket is reached, or until the stack is empty. */
+    bool have_closing_token;
+    enum token_id opening_id;
+    struct token closing_token;
 };
 
 struct expr_operation {
@@ -314,21 +324,145 @@ struct op_stack start_parsing_expression(void) {
     return result;
 }
 
-struct expr_operation parse_next_operation(
+void op_stack_push(struct op_stack *stack, struct partial_operation new) {
+    if (stack->lhs_count >= stack->lhs_cap) {
+        if (stack->lhs_cap == 0) {
+            stack->lhs =
+                malloc(16 * sizeof(struct partial_operation));
+            stack->lhs_cap = 16;
+        } else {
+            stack->lhs = realloc(stack->lhs, (stack->lhs_count + 16)
+                    * sizeof(struct partial_operation));
+            stack->lhs_cap += 16;
+        }
+    }
+    stack->lhs[stack->lhs_count] = new;
+    stack->lhs_count += 1;
+}
+
+enum op_stack_result_type {
+    OP_STACK_INTERMEDIATE_CALCULATION,
+    OP_STACK_SINGLE_REF,
+};
+struct op_stack_result {
+    enum op_stack_result_type type;
+    union {
+        struct expr_operation intermediate;
+        struct {
+            struct ref result;
+            struct token next_token;
+        } final_ref;
+    };
+};
+
+struct op_stack_result parse_next_operation(
     struct op_stack *stack,
     struct tokenizer *tokenizer
 ) {
     while (true) {
-        if (!stack->have_next_ref) {
+        struct partial_operation *top;
+        if (stack->lhs_count > 0) {
+            top = &stack->lhs[stack->lhs_count - 1];
+        } else {
+            top = NULL;
+        }
+        /* e.g. ADDITIVE and MULTIPLICATIVE will both pop a MULTIPLICATIVE,
+           but neither will pop a COMPARATIVE.
+
+               a * b *        a * b +        a < b *        a < b +
+
+           So pop if the new thing is lower (closer to ||) than the old. */
+        bool pop = false;
+        if (stack->have_next_ref && stack->have_next_op) {
+            pop = top && top->precedence != PRECEDENCE_GROUPING
+                && stack->next_precedence <= top->precedence;
+        } else if (stack->have_next_ref && stack->have_closing_token) {
+            pop = top && top->precedence != PRECEDENCE_GROUPING;
+        }
+        if (pop) {
+            struct op_stack_result result;
+            result.type = OP_STACK_INTERMEDIATE_CALCULATION;
+
+            result.intermediate.arg1 = top->arg;
+            /* TODO: make these fields match better? */
+            result.intermediate.operator = top->op;
+            result.intermediate.arg2 = stack->next_ref;
+
+            result.intermediate.output.type = REF_TEMPORARY;
+            /* TODO: what should this be?? */
+            result.intermediate.output.x = -1;
+
+            /* E.g. goes from {a + b *; c; +}, to {a +; b * c; +}. */
+            /* or {a * ( b +; c; )}, to {a * (; b * c; )}. */
+            stack->next_ref = result.intermediate.output;
+            stack->lhs_count -= 1;
+
+            return result;
+        } else if (stack->have_next_ref && stack->have_closing_token) {
+            /* Can't pop any more, so either resolve two brackets, or return
+               the final result. */
+            if (stack->opening_id == TOKEN_NULL) {
+                if (top) {
+                    fprintf(stderr, "Error on line %d, %d: Got unexpected "
+                        "token \"", stack->closing_token.row,
+                        stack->closing_token.column);
+                    fputstr(stack->closing_token.it, stderr);
+                    fprintf(stderr, "\" while parsing expression.\n");
+                    exit(EXIT_FAILURE);
+                }
+
+                struct op_stack_result result;
+                result.type = OP_STACK_SINGLE_REF;
+                result.final_ref.result = stack->next_ref;
+                result.final_ref.next_token = stack->closing_token;
+
+                stack->have_next_ref = false;
+                stack->have_closing_token = false;
+                stack->running = false;
+                if (stack->lhs_cap > 0) {
+                    free(stack->lhs);
+                    stack->lhs_cap = 0;
+                    stack->lhs = NULL;
+                }
+
+                return result;
+            } else if (!top) {
+                fprintf(stderr, "Error on line %d, %d: Got unmatched "
+                    "bracket \"", stack->closing_token.row, stack->closing_token.column);
+                fputstr(stack->closing_token.it, stderr);
+                fprintf(stderr, "\" while parsing expression.\n");
+                exit(EXIT_FAILURE);
+            } else if (stack->opening_id != top->op) {
+                fprintf(stderr, "Error on line %d, %d: Got incorrectly "
+                    "matched brackets \"%c\" and \"%c\" while parsing "
+                    "expression.", stack->closing_token.row,
+                    stack->closing_token.column, top->op,
+                    stack->closing_token.id);
+                exit(EXIT_FAILURE);
+
+            } else {
+                /* Resolve the brackets. */
+                stack->lhs_count -= 1;
+                stack->have_closing_token = false;
+                /* Keep next_ref, as if the brackets had been replaced by a
+                   single variable name. */
+            }
+        } else if (!stack->have_next_ref) {
             struct token tk = get_token(tokenizer);
 
             if (tk.id == TOKEN_NUMERIC) {
                 stack->next_ref.type = REF_CONSTANT;
                 stack->next_ref.x = convert_integer_literal(tk.it);
                 stack->have_next_ref = true;
+            } else if (tk.id == '(') {
+                /* Nothing to cascade, just push the paren and continue. */
+                struct partial_operation new;
+                new.op = tk.id;
+                new.precedence = PRECEDENCE_GROUPING;
+                op_stack_push(stack, new);
             } else {
-                fprintf(stderr, "Error on line %d, %d: Got unexpected token \"",
-                    tk.row, tk.column);
+                fprintf(stderr, "Error on line %d, %d: Got unexpected "
+                    "token \"", tk.row, tk.column);
                 fputstr(tk.it, stderr);
                 fprintf(stderr, "\" while parsing expression.\n");
                 exit(EXIT_FAILURE);
@@ -346,69 +480,24 @@ struct expr_operation parse_next_operation(
                 }
             }
             if (!stack->have_next_op) {
-                fprintf(stderr, "Error on line %d, %d: Got unexpected token \"",
-                    tk.row, tk.column);
-                fputstr(tk.it, stderr);
-                fprintf(stderr, "\" while parsing expression.\n");
-                exit(EXIT_FAILURE);
+                stack->have_closing_token = true;
+                stack->closing_token = tk;
+                if (tk.id == ')') stack->opening_id = '(';
+                else stack->opening_id = TOKEN_NULL;
             }
         } else {
-            struct partial_operation *top;
-            if (stack->lhs_count > 0) {
-                top = &stack->lhs[stack->lhs_count - 1];
-            } else {
-                top = NULL;
-            }
-            /* e.g. ADDITIVE and MULTIPLICATIVE will both pop a MULTIPLICATIVE,
-               but neither will pop a COMPARATIVE.
+            /* We have a ref and an operation, and they didn't cause anything
+               to pop, so push instead, and try again. */
+            struct partial_operation new;
+            new.arg = stack->next_ref;
+            new.op = stack->next_op;
+            new.precedence = stack->next_precedence;
+            op_stack_push(stack, new);
 
-                   a * b *        a * b +        a < b *        a < b +
+            stack->have_next_ref = false;
+            stack->have_next_op = false;
 
-               So pop if the new thing is lower (closer to ||) than the old. */
-            bool pop = top && top->precedence != PRECEDENCE_GROUPING
-                && stack->next_precedence <= top->precedence;
-            if (pop) {
-                struct expr_operation result;
-                /* TODO: make these fields match better? */
-                result.arg1 = top->arg;
-                result.operator = top->op;
-                result.arg2 = stack->next_ref;
-
-                result.output.type = REF_TEMPORARY;
-                result.output.x = -1; /* TODO: what should this be?? */
-
-                /* E.g. goes from {a + b *; c; +}, to {a +; b * c; +}. */
-                stack->next_ref = result.output;
-                stack->lhs_count -= 1;
-
-                return result;
-            } else {
-                if (stack->lhs_count >= stack->lhs_cap) {
-                    if (stack->lhs_cap == 0) {
-                        stack->lhs =
-                            malloc(16 * sizeof(struct partial_operation));
-                        stack->lhs_cap = 16;
-                    } else {
-                        stack->lhs = realloc(stack->lhs, (stack->lhs_count + 16)
-                                * sizeof(struct partial_operation));
-                        stack->lhs_cap += 16;
-                    }
-                }
-                /* top may be pointing to memory that has been reallocated, but
-                   we reuse it now, to point to the new location we are writing
-                   to. */
-                top = &stack->lhs[stack->lhs_count];
-                top->arg = stack->next_ref;
-                top->op = stack->next_op;
-                top->precedence = stack->next_precedence;
-
-                stack->lhs_count += 1;
-
-                stack->have_next_ref = false;
-                stack->have_next_op = false;
-
-                /* Continue through the loop again. */
-            }
+            /* Continue through the loop again. */
         }
     }
 }
@@ -475,13 +564,30 @@ int main(int argc, char **argv) {
 
         struct op_stack stack = start_parsing_expression();
         while (true) {
-            struct expr_operation op = parse_next_operation(&stack, &tokenizer);
-            print_ref(op.output);
-            printf(" = ");
-            print_ref(op.arg1);
-            printf(" %c ", op.operator);
-            print_ref(op.arg2);
-            printf("\n");
+            struct op_stack_result next =
+                parse_next_operation(&stack, &tokenizer);
+            if (next.type == OP_STACK_INTERMEDIATE_CALCULATION) {
+                print_ref(next.intermediate.output);
+                printf(" = ");
+                print_ref(next.intermediate.arg1);
+                printf(" %c ", next.intermediate.operator);
+                print_ref(next.intermediate.arg2);
+                printf("\n");
+            } else if (next.type == OP_STACK_SINGLE_REF) {
+                printf("Result: ");
+                print_ref(next.final_ref.result);
+                printf("\n");
+                if (next.final_ref.next_token.id != TOKEN_EOF) {
+                    fprintf(stderr, "Error at line %d, %d: Expected a complete "
+                        "expression, followed by the end of the file.\n");
+                    exit(EXIT_FAILURE);
+                } else {
+                    exit(EXIT_SUCCESS);
+                }
+            } else {
+                fprintf(stderr, "Error: Unknown op_stack result type?\n");
+                exit(EXIT_FAILURE);
+            }
         }
 
         while (true) {
