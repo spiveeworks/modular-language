@@ -3,6 +3,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "buffer.h"
+
 typedef int64_t int64;
 typedef int32_t int32;
 typedef int16_t int16;
@@ -281,14 +283,18 @@ struct partial_operation {
     enum precedence_level precedence;
 };
 
+struct partial_operation_buffer {
+    int64 count;
+    int64 capacity;
+    struct partial_operation *data;
+};
+
 struct op_stack {
     bool running;
     int64 temp_var_count;
 
     /* Represents something like  a || b && c == d +  */
-    int64 lhs_count;
-    int64 lhs_cap;
-    struct partial_operation *lhs;
+    struct partial_operation_buffer lhs;
 
     /* Represents the subsequent e, which either groups to the left or to the
        right. */
@@ -324,22 +330,6 @@ struct op_stack start_parsing_expression(void) {
     return result;
 }
 
-void op_stack_push(struct op_stack *stack, struct partial_operation new) {
-    if (stack->lhs_count >= stack->lhs_cap) {
-        if (stack->lhs_cap == 0) {
-            stack->lhs =
-                malloc(16 * sizeof(struct partial_operation));
-            stack->lhs_cap = 16;
-        } else {
-            stack->lhs = realloc(stack->lhs, (stack->lhs_count + 16)
-                    * sizeof(struct partial_operation));
-            stack->lhs_cap += 16;
-        }
-    }
-    stack->lhs[stack->lhs_count] = new;
-    stack->lhs_count += 1;
-}
-
 enum op_stack_result_type {
     OP_STACK_INTERMEDIATE_CALCULATION,
     OP_STACK_SINGLE_REF,
@@ -360,12 +350,7 @@ struct op_stack_result parse_next_operation(
     struct tokenizer *tokenizer
 ) {
     while (true) {
-        struct partial_operation *top;
-        if (stack->lhs_count > 0) {
-            top = &stack->lhs[stack->lhs_count - 1];
-        } else {
-            top = NULL;
-        }
+        struct partial_operation *top = buffer_top(stack->lhs);
         /* e.g. ADDITIVE and MULTIPLICATIVE will both pop a MULTIPLICATIVE,
            but neither will pop a COMPARATIVE.
 
@@ -395,7 +380,7 @@ struct op_stack_result parse_next_operation(
             /* E.g. goes from {a + b *; c; +}, to {a +; b * c; +}. */
             /* or {a * ( b +; c; )}, to {a * (; b * c; )}. */
             stack->next_ref = result.intermediate.output;
-            stack->lhs_count -= 1;
+            stack->lhs.count -= 1;
 
             return result;
         } else if (stack->have_next_ref && stack->have_closing_token) {
@@ -419,11 +404,7 @@ struct op_stack_result parse_next_operation(
                 stack->have_next_ref = false;
                 stack->have_closing_token = false;
                 stack->running = false;
-                if (stack->lhs_cap > 0) {
-                    free(stack->lhs);
-                    stack->lhs_cap = 0;
-                    stack->lhs = NULL;
-                }
+                buffer_free(stack->lhs);
 
                 return result;
             } else if (!top) {
@@ -442,7 +423,7 @@ struct op_stack_result parse_next_operation(
 
             } else {
                 /* Resolve the brackets. */
-                stack->lhs_count -= 1;
+                stack->lhs.count -= 1;
                 stack->have_closing_token = false;
                 /* Keep next_ref, as if the brackets had been replaced by a
                    single variable name. */
@@ -459,7 +440,7 @@ struct op_stack_result parse_next_operation(
                 struct partial_operation new;
                 new.op = tk.id;
                 new.precedence = PRECEDENCE_GROUPING;
-                op_stack_push(stack, new);
+                buffer_push(stack->lhs, new);
             } else {
                 fprintf(stderr, "Error on line %d, %d: Got unexpected "
                     "token \"", tk.row, tk.column);
@@ -492,7 +473,7 @@ struct op_stack_result parse_next_operation(
             new.arg = stack->next_ref;
             new.op = stack->next_op;
             new.precedence = stack->next_precedence;
-            op_stack_push(stack, new);
+            buffer_push(stack->lhs, new);
 
             stack->have_next_ref = false;
             stack->have_next_op = false;
@@ -578,8 +559,10 @@ int main(int argc, char **argv) {
                 print_ref(next.final_ref.result);
                 printf("\n");
                 if (next.final_ref.next_token.id != TOKEN_EOF) {
-                    fprintf(stderr, "Error at line %d, %d: Expected a complete "
-                        "expression, followed by the end of the file.\n");
+                    fprintf(stderr, "Error at line %d, %d: Expected a complete"
+                        " expression, followed by the end of the file.\n",
+                        next.final_ref.next_token.row,
+                        next.final_ref.next_token.column);
                     exit(EXIT_FAILURE);
                 } else {
                     exit(EXIT_SUCCESS);
