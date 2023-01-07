@@ -165,12 +165,8 @@ struct token get_token(struct tokenizer *tk) {
 
         result.id = TOKEN_ALPHANUM; /* Default value. */
         for (int i = 0; i < ARRAY_LENGTH(keywords); i++) {
-            int cmp = strncmp(
-                keywords[i].cstr,
-                result.it.data,
-                result.it.length
-            );
-            if (cmp == 0) {
+            /* TODO: calculate the keyword lengths up-front somewhere */
+            if (str_eq(result.it, from_cstr(keywords[i].cstr))) {
                 result.id = keywords[i].id;
                 break;
             }
@@ -191,7 +187,7 @@ struct token get_token(struct tokenizer *tk) {
         result.id = *tk->next; /* Default value. */
         result.it.length = 1;
         for (int i = 0; i < ARRAY_LENGTH(compound_operators); i++) {
-            /* TODO: cache these lengths */
+            /* TODO: calculate the operator lengths up-front somewhere */
             str op = from_cstr(compound_operators[i].cstr);
             if (tk->next + op.length > tk->end) continue;
             if (strncmp(tk->next, op.data, op.length) != 0) continue;
@@ -225,9 +221,59 @@ int64 convert_integer_literal(str it) {
     return result;
 }
 
-/**********/
-/* Parser */
-/**********/
+/*********/
+/* Types */
+/*********/
+
+enum type_connective {
+    TYPE_INT,
+    TYPE_UINT,
+    TYPE_WORD,
+    TYPE_FLOAT,
+    TYPE_TUPLE,
+    TYPE_ARRAY,
+};
+
+struct record_entry;
+
+struct record_table {
+    struct record_entry *data;
+    size_t count;
+    size_t capacity;
+};
+
+struct type {
+    enum type_connective connective;
+    union {
+        uint8 size; /* 0 => 8 bits, up to 3 => 64 bits */
+        struct record_table fields;
+    };
+};
+
+struct record_entry {
+    str name;
+    struct type type;
+};
+
+void destroy_type(struct type *it) {
+    if (it->connective == TYPE_TUPLE) {
+        for (int i = 0; i < it->fields.count; i++) {
+            destroy_type(&it->fields.data[i].type);
+        }
+        buffer_free(it->fields);
+    }
+};
+
+int lookup_name(struct record_table *table, str name) {
+    for (int i = table->count - 1; i >= 0; i--) {
+        if (str_eq(name, table->data[i].name)) return i;
+    }
+    return -1;
+}
+
+/*********************/
+/* Expression Parser */
+/*********************/
 
 enum precedence_level {
     PRECEDENCE_GROUPING,
@@ -347,7 +393,8 @@ struct op_stack_result {
 
 struct op_stack_result parse_next_operation(
     struct op_stack *stack,
-    struct tokenizer *tokenizer
+    struct tokenizer *tokenizer,
+    struct record_table *bindings
 ) {
     while (true) {
         struct partial_operation *top = buffer_top(stack->lhs);
@@ -374,7 +421,6 @@ struct op_stack_result parse_next_operation(
             result.intermediate.arg2 = stack->next_ref;
 
             result.intermediate.output.type = REF_TEMPORARY;
-            /* TODO: what should this be?? */
             result.intermediate.output.x = -1;
 
             /* E.g. goes from {a + b *; c; +}, to {a +; b * c; +}. */
@@ -435,6 +481,18 @@ struct op_stack_result parse_next_operation(
                 stack->next_ref.type = REF_CONSTANT;
                 stack->next_ref.x = convert_integer_literal(tk.it);
                 stack->have_next_ref = true;
+            } else if (tk.id == TOKEN_ALPHANUM) {
+                stack->next_ref.type = REF_LOCAL;
+                stack->next_ref.x = lookup_name(bindings, tk.it);
+                stack->have_next_ref = true;
+
+                if (stack->next_ref.x == -1) {
+                    fprintf(stderr, "Error on line %d, %d: \"",
+                        tk.row, tk.column);
+                    fputstr(tk.it, stderr);
+                    fprintf(stderr, "\" is not defined in this scope.\n");
+                    exit(EXIT_FAILURE);
+                }
             } else if (tk.id == '(') {
                 /* Nothing to cascade, just push the paren and continue. */
                 struct partial_operation new;
@@ -481,6 +539,224 @@ struct op_stack_result parse_next_operation(
             /* Continue through the loop again. */
         }
     }
+}
+
+/*******************/
+/* Type Resolution */
+/*******************/
+
+enum operation {
+    OP_NULL,
+    OP_LOR,
+    OP_LAND,
+    OP_EQ,
+    OP_NEQ,
+    OP_LEQ,
+    OP_GEQ,
+    OP_LESS,
+    OP_GREATER,
+    OP_BOR,
+    OP_BAND,
+    OP_BXOR,
+    OP_PLUS,
+    OP_MINUS,
+    OP_LSHIFT,
+    OP_RSHIFT,
+    OP_MUL,
+    OP_DIV,
+    OP_EDIV,
+    OP_MOD,
+    OP_EMOD,
+};
+
+enum operation_flags {
+    OP_8BIT  = 0x0,
+    OP_16BIT = 0x1,
+    OP_32BIT = 0x2,
+    OP_64BIT = 0x3,
+
+    OP_FLOAT = 0x4, /* This is a mask, not a valid value on its own. */
+    OP_FLOAT32 = 0x6,
+    OP_FLOAT64 = 0x7,
+};
+
+/* Like struct expr_operation, but without overloading. */
+struct instruction {
+    enum operation op;
+    enum operation_flags flags;
+    struct ref output;
+    struct ref arg1;
+    struct ref arg2;
+};
+
+struct instruction_buffer {
+    struct instruction *data;
+    size_t count;
+    size_t capacity;
+};
+
+struct type_buffer {
+    struct type *data;
+    size_t count;
+    size_t capacity;
+};
+
+struct operator_info {
+    enum token_id token;
+    enum operation opcode;
+    bool word;
+    bool floats;
+    bool signed_int;
+    bool unsigned_int;
+};
+
+struct operator_info binary_ops[] = {
+    {TOKEN_LOGIC_OR, OP_LOR, true, false},
+    {TOKEN_LOGIC_AND, OP_LAND, true, false},
+    {TOKEN_EQ, OP_EQ, true, true},
+    {TOKEN_NEQ, OP_NEQ, true, true},
+    {TOKEN_LEQ, OP_LEQ, false, true, true, true},
+    {TOKEN_GEQ, OP_GEQ, false, true, true, true},
+    {'<', OP_LESS, false, true, true, true},
+    {'>', OP_GREATER, false, true, true, true},
+    {'|', OP_BOR, true, false},
+    {'&', OP_BAND, true, false},
+    {'^', OP_BXOR, true, false},
+    {'+', OP_PLUS, true, true},
+    {'-', OP_MINUS, true, true},
+    {TOKEN_LSHIFT, OP_LSHIFT, true, true},
+    {TOKEN_RSHIFT, OP_RSHIFT, false, true, true, true},
+    {'*', OP_MUL, true, true},
+    {'/', OP_DIV, false, true, true, true},
+    {'%', OP_MOD, false, true, true, true},
+};
+
+/*
+struct operator_info unary_ops = {
+    {'-', OP_NEG, true, true},
+    {'~', OP_BNOT, true, false},
+    {'*', OP_OPEN, false, false, false, false},
+};
+*/
+
+struct type get_type_info(
+    struct record_table *bindings,
+    struct type_buffer *intermediates,
+    struct ref it
+) {
+    struct type result;
+    switch (it.type) {
+      case REF_CONSTANT:
+        result.connective = TYPE_INT;
+        result.size = 3;
+        break;
+      case REF_GLOBAL:
+        fprintf(stderr, "Error: Globals not implemented?\n");
+        exit(EXIT_FAILURE);
+        break;
+      case REF_LOCAL:
+        result = bindings->data[it.x].type;
+        break;
+      case REF_TEMPORARY:
+        result = intermediates->data[it.x];
+        break;
+    }
+    return result;
+}
+
+void compile_operation(
+    struct instruction_buffer *out,
+    struct record_table *bindings,
+    struct type_buffer *intermediates,
+    struct expr_operation in
+) {
+    struct operator_info *op = NULL;
+    for (int i = 0; i < ARRAY_LENGTH(binary_ops); i++) {
+        if (binary_ops[i].token == in.operator) {
+            op = &binary_ops[i];
+            break;
+        }
+    }
+    if (!op) {
+        if (IS_PRINTABLE(in.operator)) {
+            fprintf(stderr, "Error: Operator '%c' is not yet "
+                "implemented.\n", in.operator);
+        } else {
+            fprintf(stderr, "Error: Operator id %d is not implemented.\n",
+                in.operator);
+        }
+        exit(EXIT_FAILURE);
+    }
+
+    struct instruction result;
+    result.op = op->opcode;
+    result.arg1 = in.arg1;
+    result.arg2 = in.arg2;
+    int intermediate_count = intermediates->count;
+    if (result.arg2.type == REF_TEMPORARY) {
+        intermediate_count -= 1;
+        result.arg2.x = intermediate_count;
+    }
+    if (result.arg1.type == REF_TEMPORARY) {
+        intermediate_count -= 1;
+        result.arg1.x = intermediate_count;
+    }
+    if (intermediate_count < 0) {
+        fprintf(stderr, "Error: Ran out of temporaries??\n");
+        exit(EXIT_FAILURE);
+    }
+    struct type arg1_type =
+        get_type_info(bindings, intermediates, result.arg1);
+    struct type arg2_type =
+        get_type_info(bindings, intermediates, result.arg2);
+
+    /* Casing all the scalar connectives sounds annoying. Maybe I should make
+       the connective "scalar", or work out some bit mask trick to test them
+       all in one go. */
+    if (arg1_type.connective != TYPE_INT || arg2_type.connective != TYPE_INT) {
+        fprintf(stderr, "Error: Argument to operator %c must be an integer.\n",
+            in.operator);
+        exit(EXIT_FAILURE);
+    }
+    if (arg1_type.size != 3 || arg2_type.size != 3) {
+        fprintf(stderr, "Error: Currently only 64 bit integer types are "
+            "implemented.\n");
+        exit(EXIT_FAILURE);
+    }
+    result.flags = OP_64BIT;
+
+    while (intermediates->count > intermediate_count) {
+        destroy_type(buffer_top(*intermediates));
+        intermediates->count -= 1;
+    }
+
+    result.output = in.output;
+
+    struct type output_type;
+    output_type.connective = TYPE_INT;
+    output_type.size = 3;
+
+    switch (in.output.type) {
+      case REF_CONSTANT:
+        fprintf(stderr, "Error: Tried to write a value to a constant?\n");
+        exit(EXIT_FAILURE);
+        break;
+      case REF_GLOBAL:
+        fprintf(stderr, "Error: Globals not implemented?\n");
+        exit(EXIT_FAILURE);
+        break;
+      case REF_LOCAL:
+        /* TODO: Don't destroy types every time? */
+        destroy_type(&bindings->data[in.output.x].type);
+        bindings->data[in.output.x].type = output_type;
+        break;
+      case REF_TEMPORARY:
+        result.output.x = intermediates->count;
+        buffer_push(*intermediates, output_type);
+        break;
+    }
+
+    buffer_push(*out, result);
 }
 
 /******/
@@ -542,18 +818,33 @@ int main(int argc, char **argv) {
 
     {
         struct tokenizer tokenizer = start_tokenizer(input);
+        struct record_table bindings = {0};
+        struct type_buffer intermediates = {0};
+        struct instruction_buffer program = {0};
 
         struct op_stack stack = start_parsing_expression();
         while (true) {
             struct op_stack_result next =
-                parse_next_operation(&stack, &tokenizer);
+                parse_next_operation(&stack, &tokenizer, &bindings);
+
             if (next.type == OP_STACK_INTERMEDIATE_CALCULATION) {
-                print_ref(next.intermediate.output);
-                printf(" = ");
-                print_ref(next.intermediate.arg1);
-                printf(" %c ", next.intermediate.operator);
-                print_ref(next.intermediate.arg2);
-                printf("\n");
+                int i = program.count;
+                compile_operation(
+                    &program,
+                    &bindings,
+                    &intermediates,
+                    next.intermediate
+                );
+
+                for (; i < program.count; i++) {
+                    struct instruction *instr = &program.data[i];
+                    print_ref(instr->output);
+                    printf(" = Op%d ", instr->op);
+                    print_ref(instr->arg1);
+                    printf(", ");
+                    print_ref(instr->arg2);
+                    printf("\n");
+                }
             } else if (next.type == OP_STACK_SINGLE_REF) {
                 printf("Result: ");
                 print_ref(next.final_ref.result);
