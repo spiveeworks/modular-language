@@ -312,6 +312,7 @@ struct precedence_info {
 };
 
 enum ref_type {
+    REF_NULL, /* Can be used to indicate that an operation is unary. */
     REF_CONSTANT,
     REF_GLOBAL,
     REF_LOCAL,
@@ -547,6 +548,7 @@ struct op_stack_result parse_next_operation(
 
 enum operation {
     OP_NULL,
+    OP_MOV,
     OP_LOR,
     OP_LAND,
     OP_EQ,
@@ -759,6 +761,65 @@ void compile_operation(
     buffer_push(*out, result);
 }
 
+struct expr_result {
+    struct type_buffer intermediates;
+    struct token next_token;
+};
+
+struct expr_result parse_expression(
+    struct instruction_buffer *out,
+    struct tokenizer *tokenizer,
+    struct record_table *bindings
+) {
+    struct type_buffer intermediates = {0};
+    struct op_stack stack = start_parsing_expression();
+
+    while (true) {
+        struct op_stack_result next =
+            parse_next_operation(&stack, tokenizer, bindings);
+
+        if (next.type == OP_STACK_INTERMEDIATE_CALCULATION) {
+            compile_operation(
+                out,
+                bindings,
+                &intermediates,
+                next.intermediate
+            );
+        } else if (next.type == OP_STACK_SINGLE_REF) {
+            struct ref ref = next.final_ref.result;
+            struct token next_token = next.final_ref.next_token;
+
+            if (ref.type != REF_TEMPORARY) {
+                struct instruction instr;
+                instr.op = OP_MOV;
+                /* TODO: other sizes?? */
+                instr.flags = OP_64BIT;
+                instr.output.type = REF_TEMPORARY;
+                instr.output.x = intermediates.count;
+                instr.arg1 = ref;
+                instr.arg2.type = REF_NULL;
+
+                buffer_push(*out, instr);
+
+                struct type ty = get_type_info(bindings, &intermediates, ref);
+
+                buffer_push(intermediates, ty);
+            }
+            if (intermediates.count != 1) {
+                fprintf(stderr, "Error: Got %llu temporaries from an "
+                    "expression that reported a single ref result?\n",
+                    intermediates.count);
+                exit(EXIT_FAILURE);
+            }
+            struct expr_result result = {intermediates, next_token};
+            return result;
+        } else {
+            fprintf(stderr, "Error: Unknown op_stack result type?\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+}
+
 /******/
 /* IO */
 /******/
@@ -816,68 +877,30 @@ int main(int argc, char **argv) {
 
     str input = read_file(argv[1]);
 
-    {
-        struct tokenizer tokenizer = start_tokenizer(input);
-        struct record_table bindings = {0};
-        struct type_buffer intermediates = {0};
-        struct instruction_buffer program = {0};
+    struct tokenizer tokenizer = start_tokenizer(input);
+    struct record_table bindings = {0};
+    struct instruction_buffer program = {0};
 
-        struct op_stack stack = start_parsing_expression();
-        while (true) {
-            struct op_stack_result next =
-                parse_next_operation(&stack, &tokenizer, &bindings);
+    struct expr_result expr =
+        parse_expression(&program, &tokenizer, &bindings);
 
-            if (next.type == OP_STACK_INTERMEDIATE_CALCULATION) {
-                int i = program.count;
-                compile_operation(
-                    &program,
-                    &bindings,
-                    &intermediates,
-                    next.intermediate
-                );
+    for (int i = 0; i < program.count; i++) {
+        struct instruction *instr = &program.data[i];
+        print_ref(instr->output);
+        printf(" = Op%d ", instr->op);
+        print_ref(instr->arg1);
+        printf(", ");
+        print_ref(instr->arg2);
+        printf("\n");
+    }
 
-                for (; i < program.count; i++) {
-                    struct instruction *instr = &program.data[i];
-                    print_ref(instr->output);
-                    printf(" = Op%d ", instr->op);
-                    print_ref(instr->arg1);
-                    printf(", ");
-                    print_ref(instr->arg2);
-                    printf("\n");
-                }
-            } else if (next.type == OP_STACK_SINGLE_REF) {
-                printf("Result: ");
-                print_ref(next.final_ref.result);
-                printf("\n");
-                if (next.final_ref.next_token.id != TOKEN_EOF) {
-                    fprintf(stderr, "Error at line %d, %d: Expected a complete"
-                        " expression, followed by the end of the file.\n",
-                        next.final_ref.next_token.row,
-                        next.final_ref.next_token.column);
-                    exit(EXIT_FAILURE);
-                } else {
-                    exit(EXIT_SUCCESS);
-                }
-            } else {
-                fprintf(stderr, "Error: Unknown op_stack result type?\n");
-                exit(EXIT_FAILURE);
-            }
-        }
-
-        while (true) {
-            struct token tk = get_token(&tokenizer);
-            if (tk.id == TOKEN_EOF) break;
-
-            if (tk.it.length == 1) {
-                printf("Line %d, row %d, id %d, \'%c\'\n",
-                    tk.row, tk.column, tk.id, tk.it.data[0]);
-            } else {
-                printf("Line %d, row %d, id %d, \"",
-                    tk.row, tk.column, tk.id);
-                fwrite(tk.it.data, 1, tk.it.length, stdout);
-                printf("\"\n");
-            }
-        }
+    printf("Produced %llu values.\n", expr.intermediates.count);
+    if (expr.next_token.id != TOKEN_EOF) {
+        fprintf(stderr, "Error at line %d, %d: Expected a complete"
+            " expression, followed by the end of the file.\n",
+            expr.next_token.row,
+            expr.next_token.column);
+        exit(EXIT_FAILURE);
     }
 
     return 0;
