@@ -74,7 +74,10 @@ enum token_id {
 
     TOKEN_ALPHANUM = 128,
     TOKEN_NUMERIC,
+
     TOKEN_ARROW,
+    TOKEN_DEFINE,
+
     TOKEN_EQ,
     TOKEN_NEQ,
     TOKEN_LEQ,
@@ -83,6 +86,8 @@ enum token_id {
     TOKEN_RSHIFT,
 
     TOKEN_FUNC,
+    TOKEN_VAR,
+    TOKEN_REF,
     TOKEN_LOGIC_NOT,
     TOKEN_LOGIC_OR,
     TOKEN_LOGIC_AND,
@@ -96,6 +101,8 @@ struct token_definition {
 
 struct token_definition keywords[] = {
     {"func", TOKEN_FUNC},
+    {"var", TOKEN_VAR},
+    {"ref", TOKEN_REF},
     {"not", TOKEN_LOGIC_NOT},
     {"or", TOKEN_LOGIC_OR},
     {"and", TOKEN_LOGIC_AND},
@@ -103,6 +110,7 @@ struct token_definition keywords[] = {
 
 struct token_definition compound_operators[] = {
     {"->", TOKEN_ARROW},
+    {":=", TOKEN_DEFINE},
 
     {"==", TOKEN_EQ},
     {"/=", TOKEN_NEQ},
@@ -842,8 +850,34 @@ void compile_expression(
                 exit(EXIT_FAILURE);
             }
         } else if (type == RPN_VALUE) {
-            fprintf(stderr, "Error: Mov not yet implemented.\n");
-            exit(EXIT_FAILURE);
+            struct ref ref = compile_value_token(bindings, &in->data[i].tk);
+            if (ref.type == REF_LOCAL) {
+                struct type *binding_type = &bindings->data[ref.x].type;
+                buffer_push(*intermediates, *binding_type);
+                if (binding_type->connective != TYPE_INT || binding_type->size != 3) {
+                    fprintf(stderr, "Error: Move instructions are only "
+                        "implemented for 64 bit integers.\n");
+                    exit(EXIT_FAILURE);
+                }
+            } else if (ref.type == REF_CONSTANT) {
+                struct type output_type;
+                output_type.connective = TYPE_INT;
+                output_type.size = 3;
+                buffer_push(*intermediates, output_type);
+            } else {
+                fprintf(stderr, "Error: Got unknown ref type during mov "
+                    "compilation?\n");
+                exit(EXIT_FAILURE);
+            }
+
+            struct instruction instr;
+            instr.op = OP_MOV;
+            instr.flags = OP_64BIT;
+            instr.output.type = REF_TEMPORARY;
+            instr.output.x = intermediates->count - 1;
+            instr.arg1 = ref;
+            instr.arg2.type = REF_NULL;
+            buffer_push(*out, instr);
         } else {
             fprintf(stderr, "Error: Got unknown atom type in RPN "
                 "compilation?\n");
@@ -852,6 +886,123 @@ void compile_expression(
 
         i = i + j + 1;
     }
+}
+
+void assert_match_pattern(
+    struct instruction_buffer *out,
+    struct record_table *bindings,
+    struct rpn_buffer *pattern,
+    struct type_buffer *values
+) {
+    /* TODO: do I want to bind these forwards? Or backwards? */
+    while (pattern->count > 0) {
+        if (values->count == 0) {
+            struct token *tk = &pattern->data[0].tk;
+            fprintf(stderr, "Error at line %d, %d: There are more values on "
+                "the left hand side of the assignment than on the right hand "
+                "side.\n", tk->row, tk->column);
+            exit(EXIT_FAILURE);
+        }
+
+        struct rpn_atom *name = buffer_top(*pattern);
+        if (name->type != RPN_VALUE) {
+            fprintf(stderr, "Error at line %d, %d: The operator \"",
+                name->tk.row, name->tk.column);
+            fputstr(name->tk.it, stderr);
+            fprintf(stderr, "\" appeared on the left hand side of an "
+                "assignment statement. Pattern matching is not "
+                "implemented.\n");
+            exit(EXIT_FAILURE);
+        }
+        if (name->tk.id != TOKEN_ALPHANUM) {
+            fprintf(stderr, "Error at line %d, %d: The literal \"",
+                name->tk.row, name->tk.column);
+            fputstr(name->tk.it, stderr);
+            fprintf(stderr, "\" appeared on the left hand side of an "
+                "assignment statement. Pattern matching is not "
+                "implemented.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        struct record_entry *new = buffer_addn(*bindings, 1);
+        new->name = name->tk.it;
+        struct type val_type = buffer_pop(*values);
+        new->type = val_type;
+
+        /* TODO: Make a procedure for these mov operations. */
+        struct instruction instr;
+        instr.op = OP_MOV;
+        instr.flags = OP_64BIT;
+        instr.output.type = REF_LOCAL;
+        instr.output.x = bindings->count - 1;
+        instr.arg1.type = REF_TEMPORARY;
+        instr.arg1.x = values->count;
+        instr.arg2.type = REF_NULL;
+        buffer_push(*out, instr);
+
+        if (pattern->count == 1 && values->count > 0) {
+            struct token *tk = &pattern->data[0].tk;
+            fprintf(stderr, "Error at line %d, %d: There are more values on "
+                "the right hand side of the assignment than on the left hand "
+                "side.\n", tk->row, tk->column);
+            exit(EXIT_FAILURE);
+        }
+
+        pattern->count -= 1;
+    }
+}
+
+/********************/
+/* Statement Parser */
+/********************/
+
+void parse_statement(
+    struct instruction_buffer *out,
+    struct tokenizer *tokenizer,
+    struct record_table *bindings
+) {
+    struct expr_parse_result lhs = parse_expression(tokenizer);
+
+    struct token tk = lhs.next_token;
+    if (tk.id == TOKEN_DEFINE) {
+        if (lhs.has_ref_decl) {
+            fprintf(stderr, "Error: \'ref\' is not yet supported.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        struct expr_parse_result rhs = parse_expression(tokenizer);
+        if (rhs.next_token.id != ';') {
+            /* TODO: Make a token assert proc? */
+            fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
+                rhs.next_token.row, rhs.next_token.column);
+            exit(EXIT_FAILURE);
+        }
+
+        /* TODO: reuse intermediates buffer. */
+        struct type_buffer intermediates = {0};
+        compile_expression(
+            out,
+            bindings,
+            &intermediates,
+            &rhs.atoms
+        );
+        buffer_free(rhs.atoms);
+
+        assert_match_pattern(out, bindings, &lhs.atoms, &intermediates);
+
+        buffer_free(lhs.atoms);
+        buffer_free(intermediates);
+    } else if (tk.id == '=') {
+        fprintf(stderr, "Error: Ref assignment not yet implemented.\n");
+        exit(EXIT_FAILURE);
+    } else {
+        fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
+            tk.row, tk.column);
+        fputstr(tk.it, stderr);
+        fprintf(stderr, "\" after expression.\n");
+        exit(EXIT_FAILURE);
+    }
+
 }
 
 /******/
@@ -915,40 +1066,31 @@ int main(int argc, char **argv) {
     struct record_table bindings = {0};
     struct instruction_buffer program = {0};
 
-    struct expr_parse_result expr = parse_expression(&tokenizer);
-    printf("RPN output: ");
-    for (int i = 0; i < expr.atoms.count; i++) {
-        if (i > 0) printf(" ");
-        fputstr(expr.atoms.data[i].tk.it, stdout);
-        if (expr.atoms.data[i].type == RPN_BINARY_REVERSE) printf("r");
-    }
-    printf("\n\n");
+    while (true) {
+        int prev_count = program.count;
+        parse_statement(
+            &program,
+            &tokenizer,
+            &bindings
+        );
 
-    struct type_buffer intermediates = {0};
-    compile_expression(
-        &program,
-        &bindings,
-        &intermediates,
-        &expr.atoms
-    );
-
-    for (int i = 0; i < program.count; i++) {
-        struct instruction *instr = &program.data[i];
-        print_ref(instr->output);
-        printf(" = Op%d ", instr->op);
-        print_ref(instr->arg1);
-        printf(", ");
-        print_ref(instr->arg2);
-        printf("\n");
-    }
-
-    printf("Produced %llu values.\n", intermediates.count);
-    if (expr.next_token.id != TOKEN_EOF) {
-        fprintf(stderr, "Error at line %d, %d: Expected a complete"
-            " expression, followed by the end of the file.\n",
-            expr.next_token.row,
-            expr.next_token.column);
-        exit(EXIT_FAILURE);
+        printf("\nStatement parsed. Output:\n");
+        for (int i = prev_count; i < program.count; i++) {
+            struct instruction *instr = &program.data[i];
+            if (instr->op == OP_MOV) {
+                print_ref(instr->output);
+                printf(" = ", instr->op);
+                print_ref(instr->arg1);
+                printf("\n");
+            } else {
+                print_ref(instr->output);
+                printf(" = Op%d ", instr->op);
+                print_ref(instr->arg1);
+                printf(", ");
+                print_ref(instr->arg2);
+                printf("\n");
+            }
+        }
     }
 
     return 0;

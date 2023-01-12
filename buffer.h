@@ -13,7 +13,7 @@
 
 #define buffer_top(A) ((A).count > 0 ? &(A).data[(A).count - 1] : NULL)
 #define buffer_free(A) ((A).capacity > 0 ? free((A).data) : 0)
-#define buffer_pop(A) ((A).data[(A).count--])
+#define buffer_pop(A) ((A).data[--(A).count])
 
 void *array_realloc_proc(
     void *data,
