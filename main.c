@@ -275,6 +275,27 @@ int lookup_name(struct record_table *table, str name) {
 /* Expression Parser */
 /*********************/
 
+enum rpn_atom_type {
+    RPN_VALUE,
+    RPN_UNARY,
+    RPN_BINARY,
+    RPN_BINARY_REVERSE,
+    RPN_GROUPING,
+};
+
+struct rpn_atom {
+    enum rpn_atom_type type;
+    struct token tk;
+};
+
+/* This is like our AST, but we will be compiling it as soon as possible. */
+struct rpn_buffer {
+    struct rpn_atom *data;
+    size_t count;
+    size_t capacity;
+};
+
+/* Now we just need to parse those RPN buffers. */
 enum precedence_level {
     PRECEDENCE_GROUPING,
     PRECEDENCE_DISJUNCTIVE,
@@ -311,48 +332,45 @@ struct precedence_info {
     {'.', PRECEDENCE_STRUCTURAL},
 };
 
-enum ref_type {
-    REF_NULL, /* Can be used to indicate that an operation is unary. */
-    REF_CONSTANT,
-    REF_GLOBAL,
-    REF_LOCAL,
-    REF_TEMPORARY,
+struct rpn_ref {
+    /* Could use TOKEN_NULL instead of this flag. */
+    bool push;
+    struct token tk;
 };
 
-struct ref {
-    enum ref_type type;
-    int64 x;
-};
+void push_rpn_ref(struct rpn_buffer *out, struct rpn_ref *ref) {
+    if (ref->push) {
+        struct rpn_atom it = {RPN_VALUE, ref->tk};
+        buffer_push(*out, it);
+    }
+}
 
 struct partial_operation {
-    struct ref arg;
-    enum token_id op;
+    struct rpn_ref arg; /* May or may not give an RPN_VALUE to push. */
+    struct rpn_atom op; /* Can't be RPN_VALUE. */
     enum precedence_level precedence;
 };
 
 struct partial_operation_buffer {
-    int64 count;
-    int64 capacity;
+    size_t count;
+    size_t capacity;
     struct partial_operation *data;
 };
 
 struct op_stack {
-    bool running;
-    int64 temp_var_count;
-
     /* Represents something like  a || b && c == d +  */
     struct partial_operation_buffer lhs;
 
     /* Represents the subsequent e, which either groups to the left or to the
        right. */
     bool have_next_ref;
-    struct ref next_ref;
+    struct rpn_ref next_ref;
 
     /* Represents the subsequent operation, which either causes a cascade of
        binary operations to group together, or adds a new partial operation to
        the stack. */
     bool have_next_op;
-    enum token_id next_op;
+    struct rpn_atom next_op;
     enum precedence_level next_precedence;
 
     /* Represents a closing bracket or semicolon that will pop results until
@@ -362,43 +380,19 @@ struct op_stack {
     struct token closing_token;
 };
 
-struct expr_operation {
-    enum token_id operator;
-    struct ref output;
-    struct ref arg1;
-    struct ref arg2;
+struct expr_parse_result {
+    bool has_ref_decl;
+    struct rpn_buffer atoms;
+    struct token next_token;
 };
 
-struct op_stack start_parsing_expression(void) {
-    struct op_stack result = {0};
+struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
+    bool has_ref_decl = false;
+    struct rpn_buffer out = {0};
 
-    result.running = true;
-
-    return result;
-}
-
-enum op_stack_result_type {
-    OP_STACK_INTERMEDIATE_CALCULATION,
-    OP_STACK_SINGLE_REF,
-};
-struct op_stack_result {
-    enum op_stack_result_type type;
-    union {
-        struct expr_operation intermediate;
-        struct {
-            struct ref result;
-            struct token next_token;
-        } final_ref;
-    };
-};
-
-struct op_stack_result parse_next_operation(
-    struct op_stack *stack,
-    struct tokenizer *tokenizer,
-    struct record_table *bindings
-) {
+    struct op_stack stack = {0};
     while (true) {
-        struct partial_operation *top = buffer_top(stack->lhs);
+        struct partial_operation *top = buffer_top(stack.lhs);
         /* e.g. ADDITIVE and MULTIPLICATIVE will both pop a MULTIPLICATIVE,
            but neither will pop a COMPARATIVE.
 
@@ -406,100 +400,81 @@ struct op_stack_result parse_next_operation(
 
            So pop if the new thing is lower (closer to ||) than the old. */
         bool pop = false;
-        if (stack->have_next_ref && stack->have_next_op) {
+        if (stack.have_next_ref && stack.have_next_op) {
             pop = top && top->precedence != PRECEDENCE_GROUPING
-                && stack->next_precedence <= top->precedence;
-        } else if (stack->have_next_ref && stack->have_closing_token) {
+                && stack.next_precedence <= top->precedence;
+        } else if (stack.have_next_ref && stack.have_closing_token) {
             pop = top && top->precedence != PRECEDENCE_GROUPING;
         }
         if (pop) {
-            struct op_stack_result result;
-            result.type = OP_STACK_INTERMEDIATE_CALCULATION;
-
-            result.intermediate.arg1 = top->arg;
-            /* TODO: make these fields match better? */
-            result.intermediate.operator = top->op;
-            result.intermediate.arg2 = stack->next_ref;
-
-            result.intermediate.output.type = REF_TEMPORARY;
-            result.intermediate.output.x = -1;
+            push_rpn_ref(&out, &top->arg);
+            push_rpn_ref(&out, &stack.next_ref);
+            if (top->arg.push && !stack.next_ref.push) {
+                top->op.type = RPN_BINARY_REVERSE;
+            }
+            buffer_push(out, top->op);
 
             /* E.g. goes from {a + b *; c; +}, to {a +; b * c; +}. */
             /* or {a * ( b +; c; )}, to {a * (; b * c; )}. */
-            stack->next_ref = result.intermediate.output;
-            stack->lhs.count -= 1;
-
-            return result;
-        } else if (stack->have_next_ref && stack->have_closing_token) {
+            stack.next_ref.push = false;
+            stack.lhs.count--;
+        } else if (stack.have_next_ref && stack.have_closing_token) {
             /* Can't pop any more, so either resolve two brackets, or return
                the final result. */
-            if (stack->opening_id == TOKEN_NULL) {
+            if (stack.opening_id == TOKEN_NULL) {
                 if (top) {
                     fprintf(stderr, "Error on line %d, %d: Got unexpected "
-                        "token \"", stack->closing_token.row,
-                        stack->closing_token.column);
-                    fputstr(stack->closing_token.it, stderr);
+                        "token \"", stack.closing_token.row,
+                        stack.closing_token.column);
+                    fputstr(stack.closing_token.it, stderr);
                     fprintf(stderr, "\" while parsing expression.\n");
                     exit(EXIT_FAILURE);
                 }
 
-                struct op_stack_result result;
-                result.type = OP_STACK_SINGLE_REF;
-                result.final_ref.result = stack->next_ref;
-                result.final_ref.next_token = stack->closing_token;
+                push_rpn_ref(&out, &stack.next_ref);
 
-                stack->have_next_ref = false;
-                stack->have_closing_token = false;
-                stack->running = false;
-                buffer_free(stack->lhs);
+                buffer_free(stack.lhs);
 
+                struct expr_parse_result result;
+                result.has_ref_decl = has_ref_decl;
+                result.atoms = out;
+                result.next_token = stack.closing_token;
                 return result;
             } else if (!top) {
                 fprintf(stderr, "Error on line %d, %d: Got unmatched "
-                    "bracket \"", stack->closing_token.row, stack->closing_token.column);
-                fputstr(stack->closing_token.it, stderr);
+                    "bracket \"", stack.closing_token.row, stack.closing_token.column);
+                fputstr(stack.closing_token.it, stderr);
                 fprintf(stderr, "\" while parsing expression.\n");
                 exit(EXIT_FAILURE);
-            } else if (stack->opening_id != top->op) {
+            } else if (stack.opening_id != top->op.tk.id) {
                 fprintf(stderr, "Error on line %d, %d: Got incorrectly "
                     "matched brackets \"%c\" and \"%c\" while parsing "
-                    "expression.", stack->closing_token.row,
-                    stack->closing_token.column, top->op,
-                    stack->closing_token.id);
+                    "expression.", stack.closing_token.row,
+                    stack.closing_token.column, top->op.tk.id,
+                    stack.closing_token.id);
                 exit(EXIT_FAILURE);
 
             } else {
                 /* Resolve the brackets. */
-                stack->lhs.count -= 1;
-                stack->have_closing_token = false;
+                stack.lhs.count -= 1;
+                stack.have_closing_token = false;
                 /* Keep next_ref, as if the brackets had been replaced by a
                    single variable name. */
             }
-        } else if (!stack->have_next_ref) {
+        } else if (!stack.have_next_ref) {
             struct token tk = get_token(tokenizer);
 
-            if (tk.id == TOKEN_NUMERIC) {
-                stack->next_ref.type = REF_CONSTANT;
-                stack->next_ref.x = convert_integer_literal(tk.it);
-                stack->have_next_ref = true;
-            } else if (tk.id == TOKEN_ALPHANUM) {
-                stack->next_ref.type = REF_LOCAL;
-                stack->next_ref.x = lookup_name(bindings, tk.it);
-                stack->have_next_ref = true;
-
-                if (stack->next_ref.x == -1) {
-                    fprintf(stderr, "Error on line %d, %d: \"",
-                        tk.row, tk.column);
-                    fputstr(tk.it, stderr);
-                    fprintf(stderr, "\" is not defined in this scope.\n");
-                    exit(EXIT_FAILURE);
-                }
+            if (tk.id == TOKEN_NUMERIC || tk.id == TOKEN_ALPHANUM) {
+                stack.next_ref.push = true;
+                stack.next_ref.tk = tk;
+                stack.have_next_ref = true;
             } else if (tk.id == '(') {
                 /* Nothing to cascade, just push the paren and continue. */
                 struct partial_operation new;
-                new.op = tk.id;
+                new.op.type = RPN_GROUPING;
+                new.op.tk = tk;
                 new.precedence = PRECEDENCE_GROUPING;
-                buffer_push(stack->lhs, new);
+                buffer_push(stack.lhs, new);
             } else {
                 fprintf(stderr, "Error on line %d, %d: Got unexpected "
                     "token \"", tk.row, tk.column);
@@ -507,35 +482,36 @@ struct op_stack_result parse_next_operation(
                 fprintf(stderr, "\" while parsing expression.\n");
                 exit(EXIT_FAILURE);
             }
-        } else if (!stack->have_next_op) {
+        } else if (!stack.have_next_op) {
             struct token tk = get_token(tokenizer);
             enum token_id op = tk.id;
 
             for (int i = 0; i < ARRAY_LENGTH(precedence_info); i++) {
                 if (tk.id == precedence_info[i].operator) {
-                    stack->next_op = op;
-                    stack->next_precedence = precedence_info[i].precedence;
-                    stack->have_next_op = true;
+                    stack.next_op.type = RPN_BINARY;
+                    stack.next_op.tk = tk;
+                    stack.next_precedence = precedence_info[i].precedence;
+                    stack.have_next_op = true;
                     break;
                 }
             }
-            if (!stack->have_next_op) {
-                stack->have_closing_token = true;
-                stack->closing_token = tk;
-                if (tk.id == ')') stack->opening_id = '(';
-                else stack->opening_id = TOKEN_NULL;
+            if (!stack.have_next_op) {
+                stack.have_closing_token = true;
+                stack.closing_token = tk;
+                if (tk.id == ')') stack.opening_id = '(';
+                else stack.opening_id = TOKEN_NULL;
             }
         } else {
             /* We have a ref and an operation, and they didn't cause anything
                to pop, so push instead, and try again. */
             struct partial_operation new;
-            new.arg = stack->next_ref;
-            new.op = stack->next_op;
-            new.precedence = stack->next_precedence;
-            buffer_push(stack->lhs, new);
+            new.arg = stack.next_ref;
+            new.op = stack.next_op;
+            new.precedence = stack.next_precedence;
+            buffer_push(stack.lhs, new);
 
-            stack->have_next_ref = false;
-            stack->have_next_op = false;
+            stack.have_next_ref = false;
+            stack.have_next_op = false;
 
             /* Continue through the loop again. */
         }
@@ -582,7 +558,19 @@ enum operation_flags {
     OP_FLOAT64 = 0x7,
 };
 
-/* Like struct expr_operation, but without overloading. */
+enum ref_type {
+    REF_NULL,
+    REF_CONSTANT,
+    REF_GLOBAL,
+    REF_LOCAL,
+    REF_TEMPORARY,
+};
+
+struct ref {
+    enum ref_type type;
+    int64 x;
+};
+
 struct instruction {
     enum operation op;
     enum operation_flags flags;
@@ -666,47 +654,85 @@ struct type get_type_info(
     return result;
 }
 
+struct ref compile_value_token(
+    struct record_table *bindings,
+    struct token *in
+) {
+    if (in->id == TOKEN_ALPHANUM) {
+        int ind = lookup_name(bindings, in->it);
+        if (ind == -1) {
+            fprintf(stderr, "Error on line %d, %d: \"", in->row, in->column);
+            fputstr(in->it, stderr);
+            fprintf(stderr, "\" is not defined in this scope.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        return (struct ref){REF_LOCAL, ind};
+    }
+    /* else */
+    if (in->id == TOKEN_NUMERIC) {
+        int64 value = convert_integer_literal(in->it);
+        return (struct ref){REF_CONSTANT, value};
+    }
+    /* else */
+
+    fprintf(stderr, "Error: Asked to compile \"");
+    fputstr(in->it, stderr);
+    fprintf(stderr, "\" as an RPN atom?\n");
+    exit(EXIT_FAILURE);
+}
+
 void compile_operation(
     struct instruction_buffer *out,
     struct record_table *bindings,
     struct type_buffer *intermediates,
-    struct expr_operation in
+    struct rpn_ref *arg1,
+    struct rpn_ref *arg2,
+    struct token operation
 ) {
     struct operator_info *op = NULL;
     for (int i = 0; i < ARRAY_LENGTH(binary_ops); i++) {
-        if (binary_ops[i].token == in.operator) {
+        if (binary_ops[i].token == operation.id) {
             op = &binary_ops[i];
             break;
         }
     }
     if (!op) {
-        if (IS_PRINTABLE(in.operator)) {
+        if (IS_PRINTABLE(operation.id)) {
             fprintf(stderr, "Error: Operator '%c' is not yet "
-                "implemented.\n", in.operator);
+                "implemented.\n", operation.id);
         } else {
             fprintf(stderr, "Error: Operator id %d is not implemented.\n",
-                in.operator);
+                operation.id);
         }
         exit(EXIT_FAILURE);
     }
 
     struct instruction result;
     result.op = op->opcode;
-    result.arg1 = in.arg1;
-    result.arg2 = in.arg2;
+
     int intermediate_count = intermediates->count;
-    if (result.arg2.type == REF_TEMPORARY) {
-        intermediate_count -= 1;
+    if (arg2->push) {
+        result.arg2 = compile_value_token(bindings, &arg2->tk);
+    } else {
+        intermediate_count--;
+
+        result.arg2.type = REF_TEMPORARY;
         result.arg2.x = intermediate_count;
     }
-    if (result.arg1.type == REF_TEMPORARY) {
-        intermediate_count -= 1;
+    if (arg1->push) {
+        result.arg1 = compile_value_token(bindings, &arg1->tk);
+    } else {
+        intermediate_count--;
+
+        result.arg1.type = REF_TEMPORARY;
         result.arg1.x = intermediate_count;
     }
     if (intermediate_count < 0) {
         fprintf(stderr, "Error: Ran out of temporaries??\n");
         exit(EXIT_FAILURE);
     }
+    /* Make a combined rpn_ref -> {ref, type} compile function? */
     struct type arg1_type =
         get_type_info(bindings, intermediates, result.arg1);
     struct type arg2_type =
@@ -717,7 +743,7 @@ void compile_operation(
        all in one go. */
     if (arg1_type.connective != TYPE_INT || arg2_type.connective != TYPE_INT) {
         fprintf(stderr, "Error: Argument to operator %c must be an integer.\n",
-            in.operator);
+            operation.id);
         exit(EXIT_FAILURE);
     }
     if (arg1_type.size != 3 || arg2_type.size != 3) {
@@ -727,96 +753,104 @@ void compile_operation(
     }
     result.flags = OP_64BIT;
 
+    result.output.type = REF_TEMPORARY;
+    result.output.x = intermediate_count;
+
+    buffer_push(*out, result);
+
     while (intermediates->count > intermediate_count) {
         destroy_type(buffer_top(*intermediates));
         intermediates->count -= 1;
     }
 
-    result.output = in.output;
-
     struct type output_type;
     output_type.connective = TYPE_INT;
     output_type.size = 3;
-
-    switch (in.output.type) {
-      case REF_CONSTANT:
-        fprintf(stderr, "Error: Tried to write a value to a constant?\n");
-        exit(EXIT_FAILURE);
-        break;
-      case REF_GLOBAL:
-        fprintf(stderr, "Error: Globals not implemented?\n");
-        exit(EXIT_FAILURE);
-        break;
-      case REF_LOCAL:
-        /* TODO: Don't destroy types every time? */
-        destroy_type(&bindings->data[in.output.x].type);
-        bindings->data[in.output.x].type = output_type;
-        break;
-      case REF_TEMPORARY:
-        result.output.x = intermediates->count;
-        buffer_push(*intermediates, output_type);
-        break;
-    }
-
-    buffer_push(*out, result);
+    buffer_push(*intermediates, output_type);
 }
 
-struct expr_result {
-    struct type_buffer intermediates;
-    struct token next_token;
-};
-
-struct expr_result parse_expression(
+void compile_expression(
     struct instruction_buffer *out,
-    struct tokenizer *tokenizer,
-    struct record_table *bindings
+    struct record_table *bindings,
+    struct type_buffer *intermediates,
+    struct rpn_buffer *in
 ) {
-    struct type_buffer intermediates = {0};
-    struct op_stack stack = start_parsing_expression();
-
-    while (true) {
-        struct op_stack_result next =
-            parse_next_operation(&stack, tokenizer, bindings);
-
-        if (next.type == OP_STACK_INTERMEDIATE_CALCULATION) {
-            compile_operation(
-                out,
-                bindings,
-                &intermediates,
-                next.intermediate
-            );
-        } else if (next.type == OP_STACK_SINGLE_REF) {
-            struct ref ref = next.final_ref.result;
-            struct token next_token = next.final_ref.next_token;
-
-            if (ref.type != REF_TEMPORARY) {
-                struct instruction instr;
-                instr.op = OP_MOV;
-                /* TODO: other sizes?? */
-                instr.flags = OP_64BIT;
-                instr.output.type = REF_TEMPORARY;
-                instr.output.x = intermediates.count;
-                instr.arg1 = ref;
-                instr.arg2.type = REF_NULL;
-
-                buffer_push(*out, instr);
-
-                struct type ty = get_type_info(bindings, &intermediates, ref);
-
-                buffer_push(intermediates, ty);
+    int i = 0;
+    while (i < in->count) {
+        int j;
+        bool have_op = false;
+        enum rpn_atom_type type;
+        for (j = 0; j < 3 && i + j < in->count; j++) {
+            type = in->data[i + j].type;
+            if (type == RPN_BINARY
+                || type == RPN_BINARY_REVERSE
+                || (j < 2 && type == RPN_UNARY))
+            {
+                have_op = true;
+                break;
+            } else if (type != RPN_VALUE) {
+                /* make sure have_op is false, if we get some grouping operator
+                   before any binary operators. */
+                break;
             }
-            if (intermediates.count != 1) {
-                fprintf(stderr, "Error: Got %llu temporaries from an "
-                    "expression that reported a single ref result?\n",
-                    intermediates.count);
+        }
+        if (!have_op) {
+            j = 0;
+            type = in->data[i].type;
+        }
+
+        if (have_op) {
+            struct rpn_ref arg1;
+            struct rpn_ref arg2;
+            if (j >= 1) {
+                arg2.push = true;
+                arg2.tk = in->data[i + j - 1].tk;
+            } else {
+                arg2.push = false;
+            }
+            if (j >= 2) {
+                arg1.push = true;
+                arg1.tk = in->data[i + j - 2].tk;
+            } else {
+                arg1.push = false;
+            }
+            if (type == RPN_UNARY) {
+                fprintf(stderr, "Error: Unary operators are not yet "
+                    "implemented.\n");
+                exit(EXIT_FAILURE);
+            } if (type == RPN_BINARY) {
+                compile_operation(
+                    out,
+                    bindings,
+                    intermediates,
+                    &arg1,
+                    &arg2,
+                    in->data[i + j].tk
+                );
+            } else if (type == RPN_BINARY_REVERSE) {
+                compile_operation(
+                    out,
+                    bindings,
+                    intermediates,
+                    &arg2,
+                    &arg1,
+                    in->data[i + j].tk
+                );
+            } else {
+                fprintf(stderr, "Error: have_op without type that is an "
+                    "op?\n");
                 exit(EXIT_FAILURE);
             }
-            struct expr_result result = {intermediates, next_token};
-            return result;
+        } else if (type == RPN_VALUE) {
+            fprintf(stderr, "Error: Mov not yet implemented.\n");
+            exit(EXIT_FAILURE);
         } else {
-            fprintf(stderr, "Error: Unknown op_stack result type?\n");
+            fprintf(stderr, "Error: Got unknown atom type in RPN "
+                "compilation?\n");
             exit(EXIT_FAILURE);
         }
+
+        i = i + j + 1;
     }
 }
 
@@ -881,8 +915,22 @@ int main(int argc, char **argv) {
     struct record_table bindings = {0};
     struct instruction_buffer program = {0};
 
-    struct expr_result expr =
-        parse_expression(&program, &tokenizer, &bindings);
+    struct expr_parse_result expr = parse_expression(&tokenizer);
+    printf("RPN output: ");
+    for (int i = 0; i < expr.atoms.count; i++) {
+        if (i > 0) printf(" ");
+        fputstr(expr.atoms.data[i].tk.it, stdout);
+        if (expr.atoms.data[i].type == RPN_BINARY_REVERSE) printf("r");
+    }
+    printf("\n\n");
+
+    struct type_buffer intermediates = {0};
+    compile_expression(
+        &program,
+        &bindings,
+        &intermediates,
+        &expr.atoms
+    );
 
     for (int i = 0; i < program.count; i++) {
         struct instruction *instr = &program.data[i];
@@ -894,7 +942,7 @@ int main(int argc, char **argv) {
         printf("\n");
     }
 
-    printf("Produced %llu values.\n", expr.intermediates.count);
+    printf("Produced %llu values.\n", intermediates.count);
     if (expr.next_token.id != TOKEN_EOF) {
         fprintf(stderr, "Error at line %d, %d: Expected a complete"
             " expression, followed by the end of the file.\n",
