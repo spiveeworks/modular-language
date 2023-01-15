@@ -126,21 +126,4 @@ struct token get_token(struct tokenizer *tk) {
     return result;
 }
 
-int64 convert_integer_literal(str it) {
-    int64 result = 0;
-    for (int i = 0; i < it.length; i++) {
-        char c = it.data[i];
-        if (IS_NUM(c)) {
-            result *= 10;
-            result += c - '0';
-        } else {
-            fprintf(stderr, "Error: Got integer literal with unsupported "
-                "character '%c' in it.\n", c);
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    return result;
-}
-
 #endif

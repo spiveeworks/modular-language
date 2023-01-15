@@ -49,6 +49,25 @@ void fputstr(str string, FILE *f) {
     fwrite(string.data, 1, string.length, f);
 }
 
+/* This function might make less sense as integer literal logic is expanded. */
+int64 integer_from_string(str it) {
+    int64 result = 0;
+    for (int i = 0; i < it.length; i++) {
+        char c = it.data[i];
+        /* This condition is later used to define the IS_NUM macro. */
+        if (c > '0' && c <= '9') {
+            result *= 10;
+            result += c - '0';
+        } else {
+            fprintf(stderr, "Error: Got integer literal with unsupported "
+                "character '%c' in it.\n", c);
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    return result;
+}
+
 /**********/
 /* Tokens */
 /**********/

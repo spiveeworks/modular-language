@@ -66,11 +66,6 @@ struct type get_type_info(
     return result;
 }
 
-/* TODO: Store these values in the token struct? It doesn't make much sense to
-   do this parsing in a way that varies by location, does it? Unless I really
-   do want userspace integer parsing? */
-int64 convert_integer_literal(str it);
-
 struct ref compile_value_token(
     struct record_table *bindings,
     struct token *in
@@ -88,7 +83,7 @@ struct ref compile_value_token(
     }
     /* else */
     if (in->id == TOKEN_NUMERIC) {
-        int64 value = convert_integer_literal(in->it);
+        int64 value = integer_from_string(in->it);
         return (struct ref){REF_CONSTANT, value};
     }
     /* else */
