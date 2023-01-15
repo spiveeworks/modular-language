@@ -114,7 +114,6 @@ struct op_stack {
 struct expr_parse_result {
     bool has_ref_decl;
     struct rpn_buffer atoms;
-    struct token next_token;
 };
 
 struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
@@ -164,12 +163,15 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
 
                 push_rpn_ref(&out, &stack.next_ref);
 
+                put_token_back(tokenizer, stack.closing_token);
+
+                /* Now finish up. */
                 buffer_free(stack.lhs);
 
                 struct expr_parse_result result;
                 result.has_ref_decl = has_ref_decl;
                 result.atoms = out;
-                result.next_token = stack.closing_token;
+
                 return result;
             } else if (!top) {
                 fprintf(stderr, "Error on line %d, %d: Got unmatched "

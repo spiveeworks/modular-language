@@ -3,16 +3,17 @@
 
 #include "types.h"
 
+#include "tokenizer.h"
 #include "expressions.h"
 
-void parse_statement(
+void parse_assignment(
     struct instruction_buffer *out,
     struct tokenizer *tokenizer,
     struct record_table *bindings
 ) {
     struct expr_parse_result lhs = parse_expression(tokenizer);
 
-    struct token tk = lhs.next_token;
+    struct token tk = get_token(tokenizer);
     if (tk.id == TOKEN_DEFINE) {
         if (lhs.has_ref_decl) {
             fprintf(stderr, "Error: \'ref\' is not yet supported.\n");
@@ -20,10 +21,12 @@ void parse_statement(
         }
 
         struct expr_parse_result rhs = parse_expression(tokenizer);
-        if (rhs.next_token.id != ';') {
+
+        tk = get_token(tokenizer);
+        if (tk.id != ';') {
             /* TODO: Make a token assert proc? */
             fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
-                rhs.next_token.row, rhs.next_token.column);
+                tk.row, tk.column);
             exit(EXIT_FAILURE);
         }
 
@@ -51,6 +54,41 @@ void parse_statement(
         fprintf(stderr, "\" after expression.\n");
         exit(EXIT_FAILURE);
     }
+}
+
+/*******************/
+/* Top Level Items */
+/*******************/
+
+enum item_type {
+    ITEM_NULL,
+    ITEM_STATEMENT,
+};
+
+struct item {
+    enum item_type type;
+    struct instruction_buffer statement_code;
+};
+
+struct item parse_item(
+    struct tokenizer *tokenizer,
+    struct record_table *bindings
+) {
+    struct item result = {0};;
+
+    struct token tk = get_token(tokenizer);
+    if (tk.id == TOKEN_EOF) {
+        result.type = ITEM_NULL; /* Not technically necessary. */
+    } else {
+        struct instruction_buffer out = {0};
+        put_token_back(tokenizer, tk);
+        parse_assignment(&out, tokenizer, bindings);
+
+        result.type = ITEM_STATEMENT;
+        result.statement_code = out;
+    }
+
+    return result;
 }
 
 #endif

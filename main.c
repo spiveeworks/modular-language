@@ -66,32 +66,32 @@ int main(int argc, char **argv) {
 
     struct tokenizer tokenizer = start_tokenizer(input);
     struct record_table bindings = {0};
-    struct instruction_buffer program = {0};
 
     while (true) {
-        int prev_count = program.count;
-        parse_statement(
-            &program,
-            &tokenizer,
-            &bindings
-        );
+        struct item item = parse_item(&tokenizer, &bindings);
 
-        printf("\nStatement parsed. Output:\n");
-        for (int i = prev_count; i < program.count; i++) {
-            struct instruction *instr = &program.data[i];
-            if (instr->op == OP_MOV) {
-                print_ref(instr->output);
-                printf(" = ", instr->op);
-                print_ref(instr->arg1);
-                printf("\n");
-            } else {
-                print_ref(instr->output);
-                printf(" = Op%d ", instr->op);
-                print_ref(instr->arg1);
-                printf(", ");
-                print_ref(instr->arg2);
-                printf("\n");
+        if (item.type == ITEM_STATEMENT) {
+            printf("\nStatement parsed. Output:\n");
+            for (int i = 0; i < item.statement_code.count; i++) {
+                struct instruction *instr = &item.statement_code.data[i];
+                if (instr->op == OP_MOV) {
+                    print_ref(instr->output);
+                    printf(" = ", instr->op);
+                    print_ref(instr->arg1);
+                    printf("\n");
+                } else {
+                    print_ref(instr->output);
+                    printf(" = Op%d ", instr->op);
+                    print_ref(instr->arg1);
+                    printf(", ");
+                    print_ref(instr->arg2);
+                    printf("\n");
+                }
             }
+        } else if (item.type == ITEM_NULL) {
+            break;
+        } else {
+            fprintf(stderr, "Error: Unknown item type %d?\n", item.type);
         }
     }
 

@@ -8,6 +8,9 @@ struct tokenizer {
     char *end;
     int row;
     int column;
+
+    bool has_peek_token;
+    struct token peek_token;
 };
 
 struct tokenizer start_tokenizer(str input) {
@@ -42,6 +45,11 @@ struct token_definition compound_operators[] = {
 };
 
 struct token get_token(struct tokenizer *tk) {
+    if (tk->has_peek_token) {
+        tk->has_peek_token = false;
+        return tk->peek_token;
+    }
+
     while (tk->next < tk->end && IS_WHITESPACE(*tk->next)) {
         if (tk->next + 1 < tk->end
             && tk->next[0] == '\r' && tk->next[1] == '\n')
@@ -124,6 +132,23 @@ struct token get_token(struct tokenizer *tk) {
     }
 
     return result;
+}
+
+void put_token_back(struct tokenizer *tokenizer, struct token tk) {
+    if (tokenizer->has_peek_token) {
+        fprintf(stderr, "Error: Tried to put back multiple tokens?\n");
+        exit(EXIT_FAILURE);
+    }
+
+    tokenizer->peek_token = tk;
+    tokenizer->has_peek_token = true;
+}
+
+struct token peek_token(struct tokenizer *tokenizer) {
+    if (!tokenizer->has_peek_token) {
+        put_token_back(tokenizer, get_token(tokenizer));
+    }
+    return tokenizer->peek_token;
 }
 
 #endif
