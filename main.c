@@ -10,6 +10,7 @@
 #include "tokenizer.h"
 #include "expressions.h"
 #include "statements.h"
+#include "interpreter.h"
 
 str read_file(char *path) {
     FILE *input = NULL;
@@ -66,6 +67,7 @@ int main(int argc, char **argv) {
 
     struct tokenizer tokenizer = start_tokenizer(input);
     struct record_table bindings = {0};
+    struct call_stack call_stack = {0};
 
     while (true) {
         struct item item = parse_item(&tokenizer, &bindings);
@@ -88,11 +90,19 @@ int main(int argc, char **argv) {
                     printf("\n");
                 }
             }
+
+            printf("\nExecuting.\n");
+            execute_top_level_code(&call_stack, &item.statement_code);
         } else if (item.type == ITEM_NULL) {
             break;
         } else {
             fprintf(stderr, "Error: Unknown item type %d?\n", item.type);
         }
+    }
+
+    for (int i = 0; i < call_stack.vars.count; i++) {
+        struct variable_data *it = &call_stack.vars.data[i];
+        printf("l%d = %lld\n", i, (int64)it->value.val64);
     }
 
     return 0;

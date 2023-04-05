@@ -11,6 +11,8 @@
     (A).count += (N), &(A).data[(A).count - (N)])
 #define buffer_push(A, X) ((void)(*buffer_addn((A), 1) = (X)))
 
+#define buffer_setcount(A, N) (buffer_reserve((A), (N)), (A).count = (N))
+
 #define buffer_top(A) ((A).count > 0 ? &(A).data[(A).count - 1] : NULL)
 #define buffer_free(A) ((A).capacity > 0 ? free((A).data) : 0)
 #define buffer_pop(A) ((A).data[--(A).count])

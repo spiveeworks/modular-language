@@ -188,8 +188,8 @@ enum operation {
     OP_RSHIFT,
     OP_MUL,
     OP_DIV,
-    OP_EDIV,
     OP_MOD,
+    OP_EDIV,
     OP_EMOD,
 };
 

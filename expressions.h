@@ -5,6 +5,11 @@
 
 #include "tokenizer.h"
 
+/* This file converts infix expressions into postfix RPN buffers, and also
+   compiles RPN buffers into bytecode instructions. In this way we abstract
+   over the basic building blocks of builtin operations like `+` to create the
+   primitives needed for more complex syntactical constructs. */
+
 /***************************************/
 /* Reverse Polish Notation Expressions */
 /***************************************/

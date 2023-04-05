@@ -79,6 +79,9 @@ struct ref compile_value_token(
             exit(EXIT_FAILURE);
         }
 
+        /* TODO: This should really be REF_GLOBAL. Then at some point we will
+           need to pass some flags somewhere so that variable declarations
+           declare locals if they are in some block. */
         return (struct ref){REF_LOCAL, ind};
     }
     /* else */
