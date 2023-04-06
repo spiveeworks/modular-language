@@ -124,6 +124,7 @@ enum type_connective {
     TYPE_WORD,
     TYPE_FLOAT,
     TYPE_TUPLE,
+    TYPE_RECORD,
     TYPE_ARRAY,
 };
 
@@ -140,9 +141,11 @@ struct record_table {
 struct type {
     enum type_connective connective;
     union {
-        uint8 size; /* 0 => 8 bits, up to 3 => 64 bits */
+        uint8 word_size; /* 0 => 8 bits, up to 3 => 64 bits */
         struct record_table fields;
+        struct type *inner;
     };
+    int32 total_size;
 };
 
 struct record_entry {
@@ -150,12 +153,32 @@ struct record_entry {
     struct type type;
 };
 
+const struct type type_int64 = {
+    .connective = TYPE_INT,
+    .word_size = 3,
+    .total_size = 8
+};
+
+/* TODO: work out a memory arena or reference counting or something to make
+   these types safe to copy. */
+struct type type_array_of(struct type entry_type) {
+    struct type result;
+    result.connective = TYPE_ARRAY;
+    result.inner = malloc(sizeof (struct type));
+    *result.inner = entry_type;
+
+    return result;
+}
+
 void destroy_type(struct type *it) {
-    if (it->connective == TYPE_TUPLE) {
+    if (it->connective == TYPE_TUPLE || it->connective == TYPE_RECORD) {
         for (int i = 0; i < it->fields.count; i++) {
             destroy_type(&it->fields.data[i].type);
         }
         buffer_free(it->fields);
+    } else if (it->connective == TYPE_ARRAY) {
+        destroy_type(it->inner);
+        free(it->inner);
     }
 };
 

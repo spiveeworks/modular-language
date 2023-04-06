@@ -25,6 +25,7 @@ enum rpn_atom_type {
 struct rpn_atom {
     enum rpn_atom_type type;
     struct token tk;
+    int multi_value_count;
 };
 
 /* This is like our AST, but we will be compiling it as soon as possible. */
@@ -111,6 +112,7 @@ struct op_stack {
 
     /* Represents a closing bracket or semicolon that will pop results until
        either an opening bracket is reached, or until the stack is empty. */
+    /* Mutually exclusive with have_next_op. */
     bool have_closing_token;
     enum token_id opening_id;
     struct token closing_token;
@@ -119,11 +121,13 @@ struct op_stack {
 struct expr_parse_result {
     bool has_ref_decl;
     struct rpn_buffer atoms;
+    int multi_value_count;
 };
 
 struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
     bool has_ref_decl = false;
     struct rpn_buffer out = {0};
+    int final_multi_value_count = 0;
 
     struct op_stack stack = {0};
     while (true) {
@@ -150,13 +154,31 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
             buffer_push(out, top->op);
 
             /* E.g. goes from {a + b *; c; +}, to {a +; b * c; +}. */
-            /* or {a * ( b +; c; )}, to {a * (; b * c; )}. */
+            /* or {a * ( b +; c; )}, to {a * (; b + c; )}. */
             stack.next_ref.push = false;
             stack.lhs.count--;
         } else if (stack.have_next_ref && stack.have_closing_token) {
-            /* Can't pop any more, so either resolve two brackets, or return
-               the final result. */
-            if (stack.opening_id == TOKEN_NULL) {
+            /* Can't pop any more, but have hit a delimiter or comma or
+               something, so handle the closing bracket or try and return a
+               final result or something. */
+            if (stack.closing_token.id == ',') {
+                /* Just let the cascaded result exist on the stack. */
+                push_rpn_ref(&out, &stack.next_ref);
+                stack.have_next_ref = false;
+                if (top) {
+                    if (top->precedence != PRECEDENCE_GROUPING) {
+                        /* Should be impossible, but check anyway. */
+                        fprintf(stderr, "Error: Hit a comma, and tried to "
+                            "push a value into a non-grouping token?\n");
+                        exit(EXIT_FAILURE);
+                    }
+                    top->op.multi_value_count += 1;
+                } else {
+                    final_multi_value_count += 1;
+                }
+
+                stack.have_closing_token = false;
+            } else if (stack.opening_id == TOKEN_NULL) {
                 if (top) {
                     fprintf(stderr, "Error on line %d, %d: Got unexpected "
                         "token \"", stack.closing_token.row,
@@ -167,6 +189,7 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
                 }
 
                 push_rpn_ref(&out, &stack.next_ref);
+                final_multi_value_count += 1;
 
                 put_token_back(tokenizer, stack.closing_token);
 
@@ -176,6 +199,7 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
                 struct expr_parse_result result;
                 result.has_ref_decl = has_ref_decl;
                 result.atoms = out;
+                result.multi_value_count = final_multi_value_count;
 
                 return result;
             } else if (!top) {
@@ -191,13 +215,21 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
                     stack.closing_token.column, top->op.tk.id,
                     stack.closing_token.id);
                 exit(EXIT_FAILURE);
-
-            } else {
+            } else if (stack.closing_token.id == ')') {
                 /* Resolve the brackets. */
                 stack.lhs.count -= 1;
                 stack.have_closing_token = false;
                 /* Keep next_ref, as if the brackets had been replaced by a
                    single variable name. */
+            } else {
+                top->op.multi_value_count += 1;
+                buffer_push(out, top->op);
+
+                stack.next_ref.push = false;
+                stack.have_next_ref = true;
+
+                stack.lhs.count--;
+                stack.have_closing_token = false;
             }
         } else if (!stack.have_next_ref) {
             struct token tk = get_token(tokenizer);
@@ -206,11 +238,12 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
                 stack.next_ref.push = true;
                 stack.next_ref.tk = tk;
                 stack.have_next_ref = true;
-            } else if (tk.id == '(') {
+            } else if (tk.id == '(' || tk.id == '[' || tk.id == '{') {
                 /* Nothing to cascade, just push the paren and continue. */
                 struct partial_operation new;
                 new.op.type = RPN_GROUPING;
                 new.op.tk = tk;
+                new.op.multi_value_count = 0;
                 new.precedence = PRECEDENCE_GROUPING;
                 buffer_push(stack.lhs, new);
             } else {
@@ -237,6 +270,8 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
                 stack.have_closing_token = true;
                 stack.closing_token = tk;
                 if (tk.id == ')') stack.opening_id = '(';
+                else if (tk.id == ']') stack.opening_id = '[';
+                else if (tk.id == '}') stack.opening_id = '{';
                 else stack.opening_id = TOKEN_NULL;
             }
         } else {
@@ -337,16 +372,13 @@ void compile_expression(
             if (ref.type == REF_LOCAL) {
                 struct type *binding_type = &bindings->data[ref.x].type;
                 buffer_push(*intermediates, *binding_type);
-                if (binding_type->connective != TYPE_INT || binding_type->size != 3) {
+                if (binding_type->connective != TYPE_INT || binding_type->word_size != 3) {
                     fprintf(stderr, "Error: Move instructions are only "
                         "implemented for 64 bit integers.\n");
                     exit(EXIT_FAILURE);
                 }
             } else if (ref.type == REF_CONSTANT) {
-                struct type output_type;
-                output_type.connective = TYPE_INT;
-                output_type.size = 3;
-                buffer_push(*intermediates, output_type);
+                buffer_push(*intermediates, type_int64);
             } else {
                 fprintf(stderr, "Error: Got unknown ref type during mov "
                     "compilation?\n");
@@ -361,6 +393,10 @@ void compile_expression(
             instr.arg1 = ref;
             instr.arg2.type = REF_NULL;
             buffer_push(*out, instr);
+        } else if (type == RPN_GROUPING) {
+            fprintf(stderr, "Error: Array and struct literals are not yet "
+                "implemented.\n");
+            exit(EXIT_FAILURE);
         } else {
             fprintf(stderr, "Error: Got unknown atom type in RPN "
                 "compilation?\n");

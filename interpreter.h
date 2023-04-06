@@ -25,6 +25,7 @@ struct execution_stack {
 union variable_contents {
     uint64 val64;
     void *pointer;
+    uint8 bytes[16];
 };
 
 enum variable_memory_mode {

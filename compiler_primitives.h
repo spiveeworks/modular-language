@@ -49,8 +49,7 @@ struct type get_type_info(
     struct type result;
     switch (it.type) {
       case REF_CONSTANT:
-        result.connective = TYPE_INT;
-        result.size = 3;
+        result = type_int64;
         break;
       case REF_GLOBAL:
         result = bindings->data[it.x].type;
@@ -173,7 +172,7 @@ void compile_operation(
             operation.id);
         exit(EXIT_FAILURE);
     }
-    if (arg1_type.size != 3 || arg2_type.size != 3) {
+    if (arg1_type.word_size != 3 || arg2_type.word_size != 3) {
         fprintf(stderr, "Error: Currently only 64 bit integer types are "
             "implemented.\n");
         exit(EXIT_FAILURE);
@@ -190,10 +189,7 @@ void compile_operation(
         intermediates->count -= 1;
     }
 
-    struct type output_type;
-    output_type.connective = TYPE_INT;
-    output_type.size = 3;
-    buffer_push(*intermediates, output_type);
+    buffer_push(*intermediates, type_int64);
 }
 
 #endif
