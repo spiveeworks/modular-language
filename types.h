@@ -133,6 +133,8 @@ struct record_table {
     struct record_entry *data;
     size_t count;
     size_t capacity;
+
+    size_t global_count;
 };
 
 struct type {

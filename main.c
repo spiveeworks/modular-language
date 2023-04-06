@@ -93,6 +93,13 @@ int main(int argc, char **argv) {
 
             printf("\nExecuting.\n");
             execute_top_level_code(&call_stack, &item.statement_code);
+            if (call_stack.vars.global_count != bindings.global_count) {
+                fprintf(stderr, "Warning: Executing a statement resulted in "
+                    "%llu global variables being initialized, when %llu "
+                    "global variables are in scope.\n",
+                    call_stack.vars.global_count, bindings.global_count);
+                call_stack.vars.global_count = bindings.global_count;
+            }
         } else if (item.type == ITEM_NULL) {
             break;
         } else {
@@ -100,9 +107,10 @@ int main(int argc, char **argv) {
         }
     }
 
-    for (int i = 0; i < call_stack.vars.count; i++) {
+    printf("\nResults:\n");
+    for (int i = 0; i < call_stack.vars.global_count; i++) {
         struct variable_data *it = &call_stack.vars.data[i];
-        printf("l%d = %lld\n", i, (int64)it->value.val64);
+        printf("g%d = %lld\n", i, (int64)it->value.val64);
     }
 
     return 0;

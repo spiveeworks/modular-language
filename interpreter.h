@@ -136,6 +136,7 @@ void write_ref(
     }
     if (index + 1 > vars->count) buffer_setcount(*vars, index + 1);
     vars->data[index].value.val64 = value;
+    vars->data[index].mem_mode = VARIABLE_DIRECT_VALUE;
 }
 
 void continue_execution(struct call_stack *stack) {
@@ -230,11 +231,32 @@ void continue_execution(struct call_stack *stack) {
                 next->op);
             exit(EXIT_FAILURE);
         }
+
+        if (next->arg1.type == REF_TEMPORARY) {
+            size_t index = frame->locals_start + frame->locals_count
+                + next->arg1.x;
+            stack->vars.data[index].mem_mode = VARIABLE_UNBOUND;
+        }
+        if (next->arg2.type == REF_TEMPORARY) {
+            size_t index = frame->locals_start + frame->locals_count
+                + next->arg2.x;
+            stack->vars.data[index].mem_mode = VARIABLE_UNBOUND;
+        }
+
         write_ref(frame, &stack->vars, next->output, result);
+
         if (next->output.type == REF_LOCAL
-            && next->output.x + 1 > frame->locals_count)
+            && next->output.x >= frame->locals_count)
         {
             frame->locals_count = next->output.x + 1;
+        } else if (next->output.type == REF_GLOBAL
+            && next->output.x >= stack->vars.global_count)
+        {
+            stack->vars.global_count = next->output.x + 1;
+        }
+
+        while (buffer_top(stack->vars)->mem_mode == VARIABLE_UNBOUND) {
+            stack->vars.count -= 1;
         }
 
         frame->current += 1;

@@ -411,13 +411,15 @@ void assert_match_pattern(
         new->name = name->tk.it;
         struct type val_type = buffer_pop(*values);
         new->type = val_type;
+        /* TODO: make this local if we are in a block or a function. */
+        struct ref new_var = {REF_GLOBAL, bindings->count - 1};
+        bindings->global_count = bindings->count;
 
         /* TODO: Make a procedure for these mov operations. */
         struct instruction instr;
         instr.op = OP_MOV;
         instr.flags = OP_64BIT;
-        instr.output.type = REF_LOCAL;
-        instr.output.x = bindings->count - 1;
+        instr.output = new_var;
         instr.arg1.type = REF_TEMPORARY;
         instr.arg1.x = values->count;
         instr.arg2.type = REF_NULL;

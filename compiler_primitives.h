@@ -53,11 +53,10 @@ struct type get_type_info(
         result.size = 3;
         break;
       case REF_GLOBAL:
-        fprintf(stderr, "Error: Globals not implemented?\n");
-        exit(EXIT_FAILURE);
+        result = bindings->data[it.x].type;
         break;
       case REF_LOCAL:
-        result = bindings->data[it.x].type;
+        result = bindings->data[bindings->global_count + it.x].type;
         break;
       case REF_TEMPORARY:
         result = intermediates->data[it.x];
@@ -79,10 +78,14 @@ struct ref compile_value_token(
             exit(EXIT_FAILURE);
         }
 
-        /* TODO: This should really be REF_GLOBAL. Then at some point we will
-           need to pass some flags somewhere so that variable declarations
-           declare locals if they are in some block. */
-        return (struct ref){REF_LOCAL, ind};
+        enum ref_type type;
+        if (ind < bindings->global_count) {
+            type = REF_GLOBAL;
+        } else {
+            type = REF_LOCAL;
+            ind -= bindings->global_count;
+        }
+        return (struct ref){type, ind};
     }
     /* else */
     if (in->id == TOKEN_NUMERIC) {
