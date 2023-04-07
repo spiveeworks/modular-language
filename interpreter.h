@@ -222,10 +222,24 @@ void continue_execution(struct call_stack *stack) {
             else result = (arg1 - arg2 + 1) / arg2;
             break;
         case OP_EMOD:
+            /* The naive algorithm in the negative case is
+               `arg2 - ((-arg1) % arg2)`; in modular arithmetic this is
+               equivalent to arg1 % arg2, but by making arg1 positive before
+               computing the modulo, we can know that the result will actually
+               be positive at the end. */
+            /* The problem with this, though, is that ((-arg1) % arg2) is in
+               the range [0, arg2 - 1], so arg2 - that is in the range
+               [1, arg2], when we wanted it to stay in the range [0, arg2 - 1].
+               By subtracting 1 we at least get an operation that maps
+               [0, arg2 - 1] to itself, but then we need to correct by
+               computing (-arg1 - 1) % arg2 instead; these two shifts by -1
+               cancel out when one is subtracted from the other.
+                 e.g. arg1=-arg2 would give (-arg1 - 1) % arg2 = arg2 - 1,
+                      then arg2 - 1 - (arg2 - 1) = 0, which is what we want,
+                 and yet arg1=-1 would give (-arg1 - 1) % arg2 = 0,
+                      then arg2 - 1 - 0 = arg2 - 1, which is also correct. */
             if (arg1 >= 0) result = arg1 % arg2;
             else result = arg2 - 1 - (-arg1 - 1) % arg2;
-            /* e.g. (-17) mod 10, -17 -> 16 -> 6 -> 3
-               if we didn't subtract 1 then we would get (-10) mod 10 = 10 */
             break;
         default:
             fprintf(stderr, "Error: Tried to execute unknown opcode %d.\n",
