@@ -153,7 +153,7 @@ void continue_execution(struct call_stack *stack) {
         /* Execute instruction. */
         int64 arg1 = read_ref(frame, &stack->vars, next->arg1);
         int64 arg2 = 0;
-        if (next->op != OP_MOV) {
+        if (next->op != OP_MOV && next->op <= OP_EMOD) {
             arg2 = read_ref(frame, &stack->vars, next->arg2);
         }
         int64 result = 0;

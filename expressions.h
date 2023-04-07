@@ -14,6 +14,21 @@
 /* Reverse Polish Notation Expressions */
 /***************************************/
 
+/* The spirit of the parser is USUALLY to follow a naive postfix approach for
+   representing everything. calculate intermediate values using constants and
+   variables, push them onto the stack, crush them down to new intermediate
+   values using other operations, function calls, etc. and finally write the
+   result to named variable. The exception to this is in situations where we
+   need hints from prefix parsing in order to make compilation easier or more
+   powerful; in these situations we might add atoms _before_ some intermediate
+   values are calculated, so that some work can be done before any of those
+   intermediate values get compiled, e.g. to allocate an array before filling
+   it with values. Note also that we defer pushing constants and variables on
+   until just before they are consumed by an operator, which sometimes requires
+   reversing a binary operator, so that e.g. a constant can be divided by a
+   complex subexpression. We shouldn't need to implement this deferral during
+   parsing, though! TODO */
+
 enum rpn_atom_type {
     RPN_VALUE,
     RPN_UNARY,
@@ -26,6 +41,8 @@ struct rpn_atom {
     enum rpn_atom_type type;
     struct token tk;
     int multi_value_count;
+    /* bool is_postfix_grouping; or something, for f(x) and arr[i], etc. or
+       maybe this should be another rpn_atom_type? */
 };
 
 /* This is like our AST, but we will be compiling it as soon as possible. */
@@ -162,7 +179,6 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
                something, so handle the closing bracket or try and return a
                final result or something. */
             if (stack.closing_token.id == ',') {
-                /* Just let the cascaded result exist on the stack. */
                 push_rpn_ref(&out, &stack.next_ref);
                 stack.have_next_ref = false;
                 if (top) {
@@ -173,7 +189,22 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
                         exit(EXIT_FAILURE);
                     }
                     top->op.multi_value_count += 1;
+
+                    if (top->op.tk.id == '(') {
+                        fprintf(stderr, "Error at line %d, %d: There was a "
+                            "comma inside grouping parentheses.\n",
+                            top->op.tk.row, top->op.tk.column);
+                        exit(EXIT_FAILURE);
+                    }
+
+                    /* Take the result that was just calculated, and write it
+                       into whatever array or struct is being built. This is
+                       denoted with a single comma token in the RPN buffer. */
+                    struct rpn_atom *comma = buffer_addn(out, 1);
+                    comma->type = RPN_GROUPING;
+                    comma->tk = stack.closing_token;
                 } else {
+                    /* Just let the cascaded result exist on the stack. */
                     final_multi_value_count += 1;
                 }
 
@@ -222,8 +253,20 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
                 /* Keep next_ref, as if the brackets had been replaced by a
                    single variable name. */
             } else {
+                /* Push the value with one last comma, as if it were written
+                   manually. */
+                push_rpn_ref(&out, &stack.next_ref);
+                struct rpn_atom comma = {0};
+                comma.type = RPN_GROUPING;
+                comma.tk.id = ',';
+                buffer_push(out, comma);
                 top->op.multi_value_count += 1;
-                buffer_push(out, top->op);
+
+                struct rpn_atom close;
+                close.type = RPN_GROUPING;
+                close.tk = stack.closing_token;
+                close.multi_value_count = top->op.multi_value_count;
+                buffer_push(out, close);
 
                 stack.next_ref.push = false;
                 stack.have_next_ref = true;
@@ -246,6 +289,13 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
                 new.op.multi_value_count = 0;
                 new.precedence = PRECEDENCE_GROUPING;
                 buffer_push(stack.lhs, new);
+
+                if (tk.id != '(') {
+                    /* for '[' and '{' we actually want to store an atom in the
+                       rpn_buffer straight away, so that the compiler can make
+                       an instruction to allocate memory up front. */
+                    buffer_push(out, new.op);
+                }
             } else {
                 fprintf(stderr, "Error on line %d, %d: Got unexpected "
                     "token \"", tk.row, tk.column);
@@ -295,17 +345,44 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
 /* Expression Compiler */
 /***********************/
 
+struct emplace_info {
+    size_t alloc_instruction_index;
+    size_t pointer_variable_index; /* The temp/intermediate index of the output
+                                      pointer. */
+    int multi_value_count;
+    int size; /* Total size for structs, per-element size for arrays. */
+    bool is_array;
+};
+
+struct emplace_stack {
+    struct emplace_info *data;
+    size_t count;
+    size_t capacity;
+};
+
 void compile_expression(
     struct instruction_buffer *out,
     struct record_table *bindings,
     struct type_buffer *intermediates,
     struct rpn_buffer *in
 ) {
+    struct emplace_stack emplace_stack = {0};
+
     int i = 0;
     while (i < in->count) {
         int j;
         bool have_op = false;
         enum rpn_atom_type type;
+        /* look ahead for patterns like 1 1 +, x y *, y *, etc. */
+        /* We have to defer putting atoms in the buffer so that this lookahead
+           becomes possible, because in all other situations a value atom means
+           PUSH A COPY TO THE CALL STACK, to call a function or procedure. That
+           said, this might change in the future, if we want to optimize things
+           like `var x := 1;` to a single instruction with no temporaries, or
+           similar for expressions like [x, y], then ONLY function calls
+           require these temporaries. Yes, this is totally the wrong way right
+           now, I should be storing a stack of references, like I did in
+           previous RPN shunting yard parsers. TODO */
         for (j = 0; j < 3 && i + j < in->count; j++) {
             type = in->data[i + j].type;
             if (type == RPN_BINARY
@@ -393,13 +470,76 @@ void compile_expression(
             instr.arg1 = ref;
             instr.arg2.type = REF_NULL;
             buffer_push(*out, instr);
-        } else if (type == RPN_GROUPING) {
-            fprintf(stderr, "Error: Array and struct literals are not yet "
+        } else if (type != RPN_GROUPING) {
+            fprintf(stderr, "Error: Got unknown atom type in RPN "
+                "compilation?\n");
+            exit(EXIT_FAILURE);
+        } else if (in->data[i].tk.id == '[') {
+            struct emplace_info *next_emplace = buffer_addn(emplace_stack, 1);
+            next_emplace->alloc_instruction_index = out->count;
+            buffer_addn(*out, 1);
+            next_emplace->multi_value_count = 0;
+            next_emplace->size = 0;
+            next_emplace->is_array = true;
+
+            /* TODO: how do I handle these array types?? What kinds of type
+               inference am I planning on having? */
+            next_emplace->pointer_variable_index = intermediates->count;
+            struct type array_type = type_array_of(type_int64);
+            buffer_push(*intermediates, array_type);
+        } else if (in->data[i].tk.id == '{') {
+            fprintf(stderr, "Error: Struct literals are not yet "
+                "implemented.\n");
+            exit(EXIT_FAILURE);
+        } else if (in->data[i].tk.id == ',') {
+            struct emplace_info *em = buffer_top(emplace_stack);
+            if (!em) {
+                fprintf(stderr, "Error at line %d, %d: Multi-values are not "
+                    "yet implemented.\n", in->data[i].tk.row,
+                    in->data[i].tk.column);
+            }
+            if (em->multi_value_count == 0) {
+                /* TODO: infer type of the array based on this first entry. */
+            }
+            struct instruction instr;
+            instr.op = OP_ARRAY_STORE;
+            instr.flags = OP_64BIT;
+            instr.output.type = REF_TEMPORARY;
+            instr.output.x = em->pointer_variable_index;
+            instr.arg1.type = REF_CONSTANT;
+            instr.arg1.x = em->multi_value_count;
+            /* TODO: rearrange this whole thing to store refs in a stack, and
+               pop arg2 from that. */
+            instr.arg2.type = REF_TEMPORARY;
+            instr.arg2.x = intermediates->count - 1;
+            buffer_push(*out, instr);
+            intermediates->count -= 1;
+            em->multi_value_count += 1;
+        } else if (in->data[i].tk.id == ']') {
+            struct emplace_info *em = buffer_top(emplace_stack);
+            if (!em) {
+                fprintf(stderr, "Error: Tried to compile unmatched close "
+                    "bracket?\n");
+                exit(EXIT_FAILURE);
+            }
+            struct instruction *alloc_instr =
+                &out->data[em->alloc_instruction_index];
+            alloc_instr->op = OP_ARRAY_ALLOC;
+            alloc_instr->flags = 0;
+            alloc_instr->output.type = REF_TEMPORARY;
+            alloc_instr->output.x = em->pointer_variable_index;
+            alloc_instr->arg1.type = REF_CONSTANT;
+            alloc_instr->arg1.x = em->multi_value_count;
+            alloc_instr->arg2.type = REF_NULL;
+        } else if (in->data[i].tk.id == '}') {
+            fprintf(stderr, "Error: Struct literals are not yet "
                 "implemented.\n");
             exit(EXIT_FAILURE);
         } else {
-            fprintf(stderr, "Error: Got unknown atom type in RPN "
-                "compilation?\n");
+            fprintf(stderr, "Error at line %d, %d: Unknown/unimplemented "
+                "grouping token '", in->data[i].tk.row, in->data[i].tk.column);
+            fputstr(in->data[i].tk.it, stderr);
+            fprintf(stderr, "'\n");
             exit(EXIT_FAILURE);
         }
 

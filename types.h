@@ -216,6 +216,9 @@ enum operation {
     OP_MOD,
     OP_EDIV,
     OP_EMOD,
+
+    OP_ARRAY_ALLOC,
+    OP_ARRAY_STORE,
 };
 
 enum operation_flags {

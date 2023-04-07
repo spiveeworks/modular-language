@@ -78,8 +78,20 @@ int main(int argc, char **argv) {
                 struct instruction *instr = &item.statement_code.data[i];
                 if (instr->op == OP_MOV) {
                     print_ref(instr->output);
-                    printf(" = ", instr->op);
+                    printf(" = ");
                     print_ref(instr->arg1);
+                    printf("\n");
+                } else if (instr->op == OP_ARRAY_ALLOC) {
+                    print_ref(instr->output);
+                    printf(" = alloc_array(");
+                    print_ref(instr->arg1);
+                    printf(")\n");
+                } else if (instr->op == OP_ARRAY_STORE) {
+                    print_ref(instr->output);
+                    printf("[", instr->op);
+                    print_ref(instr->arg1);
+                    printf("] = ");
+                    print_ref(instr->arg2);
                     printf("\n");
                 } else {
                     print_ref(instr->output);
