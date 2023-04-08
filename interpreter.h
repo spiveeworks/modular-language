@@ -5,6 +5,76 @@
 /* We really just need the items. We could move them to types.h, or items.h? */
 #include "statements.h"
 
+/******************/
+/* Shared Buffers */
+/******************/
+
+/* The functional part of this language is designed around imperative
+   manipulations to local copies of complex arrays and so on. This means
+   reference-counting is a very natural fit; local copies can be created on
+   demand, but in situations where an array is only read and not written to, no
+   copying is necessary, including finer granularities where an array of arrays
+   is rearranged, but the inner arrays are not modified. */
+
+struct shared_buff_header {
+    int32 references;
+    int32 start_offset; /* In bytes. */
+    int32 count;
+    int32 buffer_size; /* In bytes; this is not a capacity count. */
+};
+
+struct shared_buff {
+    struct shared_buff_header *ptr;
+    int32 start_offset; /* In bytes. */
+    int32 count;
+};
+
+/* Allocate a shared buffer big enough to hold count elements each of the
+   specified size. */
+struct shared_buff shared_buff_alloc(int elem_size, int count) {
+    struct shared_buff_header *ptr =
+        malloc(sizeof(struct shared_buff_header) + elem_size * count);
+    ptr->references = 1;
+    ptr->start_offset = 0;
+    ptr->count = count;
+    ptr->buffer_size = elem_size * count;
+
+    struct shared_buff result = {ptr, 0, count};
+    return result;
+}
+
+void shared_buff_decrement(
+    struct shared_buff_header *ptr,
+    struct type *elem_type
+) {
+    if (!ptr) return;
+
+    ptr->references -= 1;
+    if (ptr->references <= 0) {
+        if (elem_type->connective == TYPE_ARRAY) {
+            uint8 *buff_start = (uint8*)&ptr[1];
+            struct shared_buff *arr =
+                (struct shared_buff*)(buff_start + ptr->start_offset);
+            for (int i = 0; i < ptr->count; i++) {
+                shared_buff_decrement(arr[i].ptr, elem_type->inner);
+            }
+        } else if (elem_type->connective != TYPE_INT) {
+            static bool warned_leak;
+            if (!warned_leak) {
+                fprintf(stderr, "Warning: Leaking data since aggregate "
+                    "garbage collection is not yet implemented.\n");
+                warned_leak = true;
+            }
+        }
+
+        free(ptr);
+    }
+}
+
+/**********************/
+/* Runtime Call Stack */
+/**********************/
+
 struct execution_frame {
     struct instruction *start;
     size_t count;
@@ -26,6 +96,7 @@ union variable_contents {
     uint64 val64;
     void *pointer;
     uint8 bytes[16];
+    struct shared_buff shared_buff;
 };
 
 enum variable_memory_mode {
@@ -85,6 +156,9 @@ void call_stack_push_exec_frame(
     frame->locals_count = 0;
 }
 
+/* Try to decode the ref, but only crash if it is corrupted, not if it is
+   REF_NULL. It isn't the interpreter's job to make sure that REF_NULL is used
+   correctly. */
 uint64 read_ref(
     struct execution_frame *frame,
     struct variable_stack *vars,
@@ -92,8 +166,7 @@ uint64 read_ref(
 ) {
     switch (ref.type) {
     case REF_NULL:
-        fprintf(stderr, "Error: ref type not set?\n");
-        exit(EXIT_FAILURE);
+        return 0;
     case REF_CONSTANT:
         return ref.x;
     case REF_GLOBAL:
@@ -112,7 +185,8 @@ void write_ref(
     struct execution_frame *frame,
     struct variable_stack *vars,
     struct ref ref,
-    uint64 value
+    union variable_contents value,
+    enum variable_memory_mode mem_mode
 ) {
     size_t index = 0;
     switch (ref.type) {
@@ -136,8 +210,8 @@ void write_ref(
         exit(EXIT_FAILURE);
     }
     if (index + 1 > vars->count) buffer_setcount(*vars, index + 1);
-    vars->data[index].value.val64 = value;
-    vars->data[index].mem_mode = VARIABLE_DIRECT_VALUE;
+    vars->data[index].value = value;
+    vars->data[index].mem_mode = mem_mode;
 }
 
 void continue_execution(struct call_stack *stack) {
@@ -152,74 +226,72 @@ void continue_execution(struct call_stack *stack) {
 
         /* Execute instruction. */
         int64 arg1 = read_ref(frame, &stack->vars, next->arg1);
-        int64 arg2 = 0;
-        if (next->op != OP_MOV && next->op <= OP_EMOD) {
-            arg2 = read_ref(frame, &stack->vars, next->arg2);
-        }
-        int64 result = 0;
+        int64 arg2 = read_ref(frame, &stack->vars, next->arg2);
+        union variable_contents result = {0};
+        enum variable_memory_mode result_mode = VARIABLE_DIRECT_VALUE;
         switch (next->op) {
         case OP_NULL:
             break;
         case OP_MOV:
-            result = arg1;
+            result.val64 = arg1;
             break;
         case OP_LOR:
-            result = arg1 || arg2;
+            result.val64 = arg1 || arg2;
             break;
         case OP_LAND:
-            result = arg1 && arg2;
+            result.val64 = arg1 && arg2;
             break;
         case OP_EQ:
-            result = arg1 == arg2;
+            result.val64 = arg1 == arg2;
             break;
         case OP_NEQ:
-            result = arg1 != arg2;
+            result.val64 = arg1 != arg2;
             break;
         case OP_LEQ:
-            result = arg1 <= arg2;
+            result.val64 = arg1 <= arg2;
             break;
         case OP_GEQ:
-            result = arg1 >= arg2;
+            result.val64 = arg1 >= arg2;
             break;
         case OP_LESS:
-            result = arg1 < arg2;
+            result.val64 = arg1 < arg2;
             break;
         case OP_GREATER:
-            result = arg1 > arg2;
+            result.val64 = arg1 > arg2;
             break;
         case OP_BOR:
-            result = arg1 | arg2;
+            result.val64 = arg1 | arg2;
             break;
         case OP_BAND:
-            result = arg1 & arg2;
+            result.val64 = arg1 & arg2;
             break;
         case OP_BXOR:
-            result = arg1 ^ arg2;
+            result.val64 = arg1 ^ arg2;
             break;
         case OP_PLUS:
-            result = arg1 + arg2;
+            result.val64 = arg1 + arg2;
             break;
         case OP_MINUS:
-            result = arg1 - arg2;
+            result.val64 = arg1 - arg2;
             break;
         case OP_LSHIFT:
-            result = arg1 << arg2;
+            result.val64 = arg1 << arg2;
             break;
         case OP_RSHIFT:
-            result = arg1 >> arg2;
+            result.val64 = arg1 >> arg2;
             break;
         case OP_MUL:
-            result = arg1 * arg2;
+            result.val64 = arg1 * arg2;
             break;
         case OP_DIV:
-            result = arg1 / arg2;
+            result.val64 = arg1 / arg2;
             break;
         case OP_MOD:
-            result = arg1 % arg2;
+            result.val64 = arg1 % arg2;
             break;
         case OP_EDIV:
-            if (arg1 >= 0) result = arg1 / arg2;
-            else result = (arg1 - arg2 + 1) / arg2;
+            if (arg1 >= 0) result.val64 = arg1 / arg2;
+            else result.val64 = (arg1 - arg2 + 1) / arg2;
             break;
         case OP_EMOD:
             /* The naive algorithm in the negative case is
@@ -238,8 +310,15 @@ void continue_execution(struct call_stack *stack) {
                       then arg2 - 1 - (arg2 - 1) = 0, which is what we want,
                  and yet arg1=-1 would give (-arg1 - 1) % arg2 = 0,
                       then arg2 - 1 - 0 = arg2 - 1, which is also correct. */
-            if (arg1 >= 0) result = arg1 % arg2;
-            else result = arg2 - 1 - (-arg1 - 1) % arg2;
+            if (arg1 >= 0) result.val64 = arg1 % arg2;
+            else result.val64 = arg2 - 1 - (-arg1 - 1) % arg2;
+            break;
+        case OP_ARRAY_ALLOC:
+            result.shared_buff = shared_buff_alloc(arg1, arg2);
+            result_mode = VARIABLE_REFCOUNT;
+            break;
+        case OP_ARRAY_STORE:
+            fprintf(stderr, "Warning: Array store is not yet implemented.\n");
             break;
         default:
             fprintf(stderr, "Error: Tried to execute unknown opcode %d.\n",
@@ -258,7 +337,7 @@ void continue_execution(struct call_stack *stack) {
             stack->vars.data[index].mem_mode = VARIABLE_UNBOUND;
         }
 
-        write_ref(frame, &stack->vars, next->output, result);
+        write_ref(frame, &stack->vars, next->output, result, result_mode);
 
         if (next->output.type == REF_LOCAL
             && next->output.x >= frame->locals_count)

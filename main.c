@@ -85,6 +85,8 @@ int main(int argc, char **argv) {
                     print_ref(instr->output);
                     printf(" = alloc_array(");
                     print_ref(instr->arg1);
+                    printf(", ");
+                    print_ref(instr->arg2);
                     printf(")\n");
                 } else if (instr->op == OP_ARRAY_STORE) {
                     print_ref(instr->output);

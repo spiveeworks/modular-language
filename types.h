@@ -166,6 +166,9 @@ struct type type_array_of(struct type entry_type) {
     result.connective = TYPE_ARRAY;
     result.inner = malloc(sizeof (struct type));
     *result.inner = entry_type;
+    /* TODO: reorganise shared_buffer to be in a place that lets us sizeof it
+       from here. */
+    result.total_size = 16;
 
     return result;
 }

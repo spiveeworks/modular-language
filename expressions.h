@@ -446,7 +446,7 @@ void compile_expression(
             }
         } else if (type == RPN_VALUE) {
             struct ref ref = compile_value_token(bindings, &in->data[i].tk);
-            if (ref.type == REF_LOCAL) {
+            if (ref.type == REF_GLOBAL) {
                 struct type *binding_type = &bindings->data[ref.x].type;
                 buffer_push(*intermediates, *binding_type);
                 if (binding_type->connective != TYPE_INT || binding_type->word_size != 3) {
@@ -500,6 +500,8 @@ void compile_expression(
             }
             if (em->multi_value_count == 0) {
                 /* TODO: infer type of the array based on this first entry. */
+                struct type *ty = buffer_top(*intermediates);
+                em->size = ty->total_size;
             }
             struct instruction instr;
             instr.op = OP_ARRAY_STORE;
@@ -529,8 +531,9 @@ void compile_expression(
             alloc_instr->output.type = REF_TEMPORARY;
             alloc_instr->output.x = em->pointer_variable_index;
             alloc_instr->arg1.type = REF_CONSTANT;
-            alloc_instr->arg1.x = em->multi_value_count;
-            alloc_instr->arg2.type = REF_NULL;
+            alloc_instr->arg1.x = em->size;
+            alloc_instr->arg2.type = REF_CONSTANT;
+            alloc_instr->arg2.x = em->multi_value_count;
         } else if (in->data[i].tk.id == '}') {
             fprintf(stderr, "Error: Struct literals are not yet "
                 "implemented.\n");
