@@ -27,6 +27,8 @@ void parse_assignment(
             /* TODO: Make a token assert proc? */
             fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
                 tk.row, tk.column);
+            fputstr(tk.it, stderr);
+            fprintf(stderr, "\"\n");
             exit(EXIT_FAILURE);
         }
 

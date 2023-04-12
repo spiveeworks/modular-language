@@ -233,6 +233,8 @@ enum operation_flags {
     OP_FLOAT = 0x4, /* This is a mask, not a valid value on its own. */
     OP_FLOAT32 = 0x6,
     OP_FLOAT64 = 0x7,
+
+    OP_SHARED_BUFF = 0x8, /* TODO: masks for lifted storage of small arrays? */
 };
 
 enum ref_type {

@@ -104,6 +104,7 @@ enum variable_memory_mode {
     VARIABLE_DIRECT_VALUE, /* Do nothing when the variable is unbound. */
     VARIABLE_MEMORY_STACK, /* Free the memory stack back to this variable. */
     VARIABLE_HEAP_OWNED, /* Free this variable from the heap. */
+    /* TODO: change this to VARIABLE_SHARED_BUFF? */
     VARIABLE_REFCOUNT /* Decrement this variable's reference count, and free it
                          if the count is zero. */
 };
@@ -159,22 +160,22 @@ void call_stack_push_exec_frame(
 /* Try to decode the ref, but only crash if it is corrupted, not if it is
    REF_NULL. It isn't the interpreter's job to make sure that REF_NULL is used
    correctly. */
-uint64 read_ref(
+union variable_contents read_ref(
     struct execution_frame *frame,
     struct variable_stack *vars,
     struct ref ref
 ) {
     switch (ref.type) {
     case REF_NULL:
-        return 0;
+        return (union variable_contents){0};
     case REF_CONSTANT:
-        return ref.x;
+        return (union variable_contents){.val64 = ref.x};
     case REF_GLOBAL:
-        return vars->data[ref.x].value.val64;
+        return vars->data[ref.x].value;
     case REF_LOCAL:
-        return vars->data[frame->locals_start + ref.x].value.val64;
+        return vars->data[frame->locals_start + ref.x].value;
     case REF_TEMPORARY:
-        return vars->data[frame->locals_start + frame->locals_count + ref.x].value.val64;
+        return vars->data[frame->locals_start + frame->locals_count + ref.x].value;
     default:
         fprintf(stderr, "Unexpected ref.type value %d?\n", ref.type);
         exit(EXIT_FAILURE);
@@ -191,8 +192,8 @@ void write_ref(
     size_t index = 0;
     switch (ref.type) {
     case REF_NULL:
-        fprintf(stderr, "Error: ref type not set?\n");
-        exit(EXIT_FAILURE);
+        /* Some operations are just used for their side-effects. */
+        return;
     case REF_CONSTANT:
         fprintf(stderr, "Error: tried to write value to a constant?\n");
         exit(EXIT_FAILURE);
@@ -214,6 +215,19 @@ void write_ref(
     vars->data[index].mem_mode = mem_mode;
 }
 
+void unbind_variable(
+    struct variable_stack *vars,
+    size_t index
+) {
+    if (vars->data[index].mem_mode == VARIABLE_REFCOUNT) {
+        /* TODO: work out how to plumb type info into the interpreter,
+           to free refcounts with. Maybe store it in the buffer? */
+        fprintf(stderr, "Warning: Reference count decrementing is not "
+            " yet implemented.\n");
+    }
+    vars->data[index].mem_mode = VARIABLE_UNBOUND;
+}
+
 void continue_execution(struct call_stack *stack) {
     while (stack->exec.count > 0) {
         struct execution_frame *frame = buffer_top(stack->exec);
@@ -225,15 +239,26 @@ void continue_execution(struct call_stack *stack) {
         struct instruction *next = &frame->start[frame->current];
 
         /* Execute instruction. */
-        int64 arg1 = read_ref(frame, &stack->vars, next->arg1);
-        int64 arg2 = read_ref(frame, &stack->vars, next->arg2);
+        union variable_contents arg1_full =
+            read_ref(frame, &stack->vars, next->arg1);
+        union variable_contents arg2_full =
+            read_ref(frame, &stack->vars, next->arg2);
+        int64 arg1 = arg1_full.val64;
+        int64 arg2 = arg2_full.val64;
         union variable_contents result = {0};
         enum variable_memory_mode result_mode = VARIABLE_DIRECT_VALUE;
+        struct ref output_ref = next->output;
         switch (next->op) {
         case OP_NULL:
             break;
         case OP_MOV:
-            result.val64 = arg1;
+            result = arg1_full;
+            if (next->flags == OP_SHARED_BUFF) {
+                result_mode = VARIABLE_REFCOUNT;
+                if (result.shared_buff.ptr != NULL) {
+                    result.shared_buff.ptr->references += 1;
+                }
+            }
             break;
         case OP_LOR:
             result.val64 = arg1 || arg2;
@@ -319,6 +344,7 @@ void continue_execution(struct call_stack *stack) {
             break;
         case OP_ARRAY_STORE:
             fprintf(stderr, "Warning: Array store is not yet implemented.\n");
+            output_ref.type = REF_NULL;
             break;
         default:
             fprintf(stderr, "Error: Tried to execute unknown opcode %d.\n",
@@ -327,17 +353,19 @@ void continue_execution(struct call_stack *stack) {
         }
 
         if (next->arg1.type == REF_TEMPORARY) {
-            size_t index = frame->locals_start + frame->locals_count
-                + next->arg1.x;
-            stack->vars.data[index].mem_mode = VARIABLE_UNBOUND;
+            unbind_variable(
+                &stack->vars,
+                frame->locals_start + frame->locals_count + next->arg1.x
+            );
         }
         if (next->arg2.type == REF_TEMPORARY) {
-            size_t index = frame->locals_start + frame->locals_count
-                + next->arg2.x;
-            stack->vars.data[index].mem_mode = VARIABLE_UNBOUND;
+            unbind_variable(
+                &stack->vars,
+                frame->locals_start + frame->locals_count + next->arg2.x
+            );
         }
 
-        write_ref(frame, &stack->vars, next->output, result, result_mode);
+        write_ref(frame, &stack->vars, output_ref, result, result_mode);
 
         if (next->output.type == REF_LOCAL
             && next->output.x >= frame->locals_count)

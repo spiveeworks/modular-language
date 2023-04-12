@@ -141,6 +141,14 @@ struct expr_parse_result {
     int multi_value_count;
 };
 
+/* TODO: make the prefix -> infix -> prefix -> infix structure more clear by
+   pulling prefix parsing and infix parsing out into separate procedures.
+   From a code theory point of view, they would still be constraint-bearing
+   code, but they bear different kinds of constraints, and pulling them out
+   says "Hey! There's a different kind of thing happening here!"... More to the
+   point, though, it is a state machine, so the usual spaghetti cost of pulling
+   out functions is basically nonexistent anyway, since it is already FSM
+   spaghetti. */
 struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
     bool has_ref_decl = false;
     struct rpn_buffer out = {0};
@@ -445,17 +453,26 @@ void compile_expression(
                 exit(EXIT_FAILURE);
             }
         } else if (type == RPN_VALUE) {
+            enum operation_flags flags = 0;
+
             struct ref ref = compile_value_token(bindings, &in->data[i].tk);
             if (ref.type == REF_GLOBAL) {
                 struct type *binding_type = &bindings->data[ref.x].type;
                 buffer_push(*intermediates, *binding_type);
-                if (binding_type->connective != TYPE_INT || binding_type->word_size != 3) {
-                    fprintf(stderr, "Error: Move instructions are only "
-                        "implemented for 64 bit integers.\n");
-                    exit(EXIT_FAILURE);
+                if (binding_type->connective == TYPE_INT) {
+                    if (binding_type->word_size != 3) {
+                        fprintf(stderr, "Error: Move instructions are only "
+                            "implemented for 64 bit integers.\n");
+                        exit(EXIT_FAILURE);
+                    }
+
+                    flags = OP_64BIT;
+                } else if (binding_type->connective == TYPE_ARRAY) {
+                    flags = OP_SHARED_BUFF;
                 }
             } else if (ref.type == REF_CONSTANT) {
                 buffer_push(*intermediates, type_int64);
+                flags = OP_64BIT;
             } else {
                 fprintf(stderr, "Error: Got unknown ref type during mov "
                     "compilation?\n");
@@ -464,7 +481,7 @@ void compile_expression(
 
             struct instruction instr;
             instr.op = OP_MOV;
-            instr.flags = OP_64BIT;
+            instr.flags = flags;
             instr.output.type = REF_TEMPORARY;
             instr.output.x = intermediates->count - 1;
             instr.arg1 = ref;
@@ -518,22 +535,23 @@ void compile_expression(
             intermediates->count -= 1;
             em->multi_value_count += 1;
         } else if (in->data[i].tk.id == ']') {
-            struct emplace_info *em = buffer_top(emplace_stack);
-            if (!em) {
+            if (emplace_stack.count <= 0) {
                 fprintf(stderr, "Error: Tried to compile unmatched close "
                     "bracket?\n");
                 exit(EXIT_FAILURE);
             }
+            struct emplace_info em = buffer_pop(emplace_stack);
+
             struct instruction *alloc_instr =
-                &out->data[em->alloc_instruction_index];
+                &out->data[em.alloc_instruction_index];
             alloc_instr->op = OP_ARRAY_ALLOC;
             alloc_instr->flags = 0;
             alloc_instr->output.type = REF_TEMPORARY;
-            alloc_instr->output.x = em->pointer_variable_index;
+            alloc_instr->output.x = em.pointer_variable_index;
             alloc_instr->arg1.type = REF_CONSTANT;
-            alloc_instr->arg1.x = em->size;
+            alloc_instr->arg1.x = em.size;
             alloc_instr->arg2.type = REF_CONSTANT;
-            alloc_instr->arg2.x = em->multi_value_count;
+            alloc_instr->arg2.x = em.multi_value_count;
         } else if (in->data[i].tk.id == '}') {
             fprintf(stderr, "Error: Struct literals are not yet "
                 "implemented.\n");
@@ -548,6 +566,8 @@ void compile_expression(
 
         i = i + j + 1;
     }
+
+    buffer_free(emplace_stack);
 }
 
 void assert_match_pattern(
