@@ -617,7 +617,16 @@ void assert_match_pattern(
         /* TODO: Make a procedure for these mov operations. */
         struct instruction instr;
         instr.op = OP_MOV;
-        instr.flags = OP_64BIT;
+        if (val_type.connective == TYPE_INT) {
+            if (val_type.word_size != 3) {
+                fprintf(stderr, "Error: Assignment is not currently supported "
+                    "for scalars other than int64.\n");
+                exit(EXIT_FAILURE);
+            }
+            instr.flags = OP_64BIT;
+        } else if (val_type.connective == TYPE_ARRAY) {
+            instr.flags = OP_SHARED_BUFF;
+        }
         instr.output = new_var;
         instr.arg1.type = REF_TEMPORARY;
         instr.arg1.x = values->count;

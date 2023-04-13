@@ -163,23 +163,33 @@ void call_stack_push_exec_frame(
 union variable_contents read_ref(
     struct execution_frame *frame,
     struct variable_stack *vars,
-    struct ref ref
+    struct ref ref,
+    enum variable_memory_mode *mem_mode
 ) {
+    size_t index = 0;
     switch (ref.type) {
     case REF_NULL:
+        if (mem_mode) *mem_mode = VARIABLE_DIRECT_VALUE;
         return (union variable_contents){0};
     case REF_CONSTANT:
+        if (mem_mode) *mem_mode = VARIABLE_DIRECT_VALUE;
         return (union variable_contents){.val64 = ref.x};
     case REF_GLOBAL:
-        return vars->data[ref.x].value;
+        index = ref.x;
+        break;
     case REF_LOCAL:
-        return vars->data[frame->locals_start + ref.x].value;
+        index = frame->locals_start + ref.x;
+        break;
     case REF_TEMPORARY:
-        return vars->data[frame->locals_start + frame->locals_count + ref.x].value;
+        index = frame->locals_start + frame->locals_count + ref.x;
+        break;
     default:
         fprintf(stderr, "Unexpected ref.type value %d?\n", ref.type);
         exit(EXIT_FAILURE);
     }
+
+    if (mem_mode) *mem_mode = vars->data[index].mem_mode;
+    return vars->data[index].value;
 }
 
 void write_ref(
@@ -239,10 +249,15 @@ void continue_execution(struct call_stack *stack) {
         struct instruction *next = &frame->start[frame->current];
 
         /* Execute instruction. */
+        enum variable_memory_mode arg1_mode, arg2_mode;
+        /* TODO: refactor this into functions that extract
+           scalars/shared_buffs, checking that the mem_mode is correct as they
+           go. May require detecting and separating out scalar operations,
+           which is something that I am considering anyway. */
         union variable_contents arg1_full =
-            read_ref(frame, &stack->vars, next->arg1);
+            read_ref(frame, &stack->vars, next->arg1, &arg1_mode);
         union variable_contents arg2_full =
-            read_ref(frame, &stack->vars, next->arg2);
+            read_ref(frame, &stack->vars, next->arg2, &arg2_mode);
         int64 arg1 = arg1_full.val64;
         int64 arg2 = arg2_full.val64;
         union variable_contents result = {0};
@@ -256,6 +271,11 @@ void continue_execution(struct call_stack *stack) {
             if (next->flags == OP_SHARED_BUFF) {
                 result_mode = VARIABLE_REFCOUNT;
                 if (result.shared_buff.ptr != NULL) {
+                    if (arg1_mode != VARIABLE_REFCOUNT) {
+                        fprintf(stderr, "Error: Tried to move an array but "
+                            "the arg was not an array?\n");
+                        exit(EXIT_FAILURE);
+                    }
                     result.shared_buff.ptr->references += 1;
                 }
             }
@@ -343,9 +363,43 @@ void continue_execution(struct call_stack *stack) {
             result_mode = VARIABLE_REFCOUNT;
             break;
         case OP_ARRAY_STORE:
-            fprintf(stderr, "Warning: Array store is not yet implemented.\n");
+          {
+            /* TODO: check that the 'output' array is a shared_buff. */
+            union variable_contents output =
+                read_ref(frame, &stack->vars, next->output, NULL);
+            if (arg1 < 0 || arg1 >= output.shared_buff.count) {
+                fprintf(stderr, "Runtime error: Tried to write to index %lld "
+                    "of an array of size %d.\n",
+                    arg1, output.shared_buff.count);
+                exit(EXIT_FAILURE);
+            }
+            /* TODO: check that the memory accessed is actually an initialised
+               and aligned part of the buffer. */
+            uint8 *buffer = (uint8*)&output.shared_buff.ptr[1];
+            uint8 *data = &buffer[output.shared_buff.start_offset];
+            /* TODO: break this instruction up into three,
+                1. calculate the memory offset, (may be const-folded, or MADed)
+                2. get a ref to that location
+                3. use a scalar-write or shared_buff-write or memcpy
+                   instruction to effect the store.
+               That way the mem_modes remain purely a robustness/correctness
+               thing. */
+            switch (arg2_mode) {
+            case VARIABLE_DIRECT_VALUE:
+                ((int64*)data)[arg1] = arg2;
+                break;
+            case VARIABLE_REFCOUNT:
+                ((struct shared_buff*)data)[arg1] = arg2_full.shared_buff;
+                break;
+            default:
+                fprintf(stderr, "Error: Currently only scalars and arrays can "
+                    "be written to arrays.\n");
+                exit(EXIT_FAILURE);
+            }
+            /* Stop the array variable from being overwritten. */
             output_ref.type = REF_NULL;
             break;
+          }
         default:
             fprintf(stderr, "Error: Tried to execute unknown opcode %d.\n",
                 next->op);
