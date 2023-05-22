@@ -36,6 +36,11 @@ str read_file(char *path) {
 }
 
 void print_ref(struct ref ref) {
+    if (ref.type == REF_STATIC_POINTER) {
+        printf("0x%p", (void*)ref.x);
+        return;
+    }
+
     switch (ref.type) {
       case REF_CONSTANT:
         printf(" ");

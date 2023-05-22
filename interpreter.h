@@ -17,6 +17,7 @@
    is rearranged, but the inner arrays are not modified. */
 
 struct shared_buff_header {
+    struct type *element_type;
     int32 references;
     int32 start_offset; /* In bytes. */
     int32 count;
@@ -31,9 +32,11 @@ struct shared_buff {
 
 /* Allocate a shared buffer big enough to hold count elements each of the
    specified size. */
-struct shared_buff shared_buff_alloc(int elem_size, int count) {
+struct shared_buff shared_buff_alloc(struct type *elem_type, int count) {
+    int elem_size = elem_type->total_size;
     struct shared_buff_header *ptr =
         malloc(sizeof(struct shared_buff_header) + elem_size * count);
+    ptr->element_type = elem_type;
     ptr->references = 1;
     ptr->start_offset = 0;
     ptr->count = count;
@@ -43,11 +46,10 @@ struct shared_buff shared_buff_alloc(int elem_size, int count) {
     return result;
 }
 
-void shared_buff_decrement(
-    struct shared_buff_header *ptr,
-    struct type *elem_type
-) {
+void shared_buff_decrement(struct shared_buff_header *ptr) {
     if (!ptr) return;
+
+    struct type *elem_type = ptr->element_type;
 
     ptr->references -= 1;
     if (ptr->references <= 0) {
@@ -56,7 +58,7 @@ void shared_buff_decrement(
             struct shared_buff *arr =
                 (struct shared_buff*)(buff_start + ptr->start_offset);
             for (int i = 0; i < ptr->count; i++) {
-                shared_buff_decrement(arr[i].ptr, elem_type->inner);
+                shared_buff_decrement(arr[i].ptr);
             }
         } else if (elem_type->connective != TYPE_INT) {
             static bool warned_leak;
@@ -174,6 +176,9 @@ union variable_contents read_ref(
     case REF_CONSTANT:
         if (mem_mode) *mem_mode = VARIABLE_DIRECT_VALUE;
         return (union variable_contents){.val64 = ref.x};
+    case REF_STATIC_POINTER:
+        if (mem_mode) *mem_mode = VARIABLE_DIRECT_VALUE;
+        return (union variable_contents){.pointer = (void*)ref.x};
     case REF_GLOBAL:
         index = ref.x;
         break;
@@ -230,10 +235,7 @@ void unbind_variable(
     size_t index
 ) {
     if (vars->data[index].mem_mode == VARIABLE_REFCOUNT) {
-        /* TODO: work out how to plumb type info into the interpreter,
-           to free refcounts with. Maybe store it in the buffer? */
-        fprintf(stderr, "Warning: Reference count decrementing is not "
-            " yet implemented.\n");
+        shared_buff_decrement(vars->data[index].value.shared_buff.ptr);
     }
     vars->data[index].mem_mode = VARIABLE_UNBOUND;
 }
@@ -359,7 +361,7 @@ void continue_execution(struct call_stack *stack) {
             else result.val64 = arg2 - 1 - (-arg1 - 1) % arg2;
             break;
         case OP_ARRAY_ALLOC:
-            result.shared_buff = shared_buff_alloc(arg1, arg2);
+            result.shared_buff = shared_buff_alloc(arg1_full.pointer, arg2);
             result_mode = VARIABLE_REFCOUNT;
             break;
         case OP_ARRAY_STORE:

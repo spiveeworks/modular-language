@@ -240,6 +240,7 @@ enum operation_flags {
 enum ref_type {
     REF_NULL,
     REF_CONSTANT,
+    REF_STATIC_POINTER, /* Does this actually need to be different? */
     REF_GLOBAL,
     REF_LOCAL,
     REF_TEMPORARY,

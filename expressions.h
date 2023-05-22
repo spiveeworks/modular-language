@@ -360,6 +360,7 @@ struct emplace_info {
     int multi_value_count;
     int size; /* Total size for structs, per-element size for arrays. */
     bool is_array;
+    struct type *element_type;
 };
 
 struct emplace_stack {
@@ -514,11 +515,21 @@ void compile_expression(
                 fprintf(stderr, "Error at line %d, %d: Multi-values are not "
                     "yet implemented.\n", in->data[i].tk.row,
                     in->data[i].tk.column);
+                exit(EXIT_FAILURE);
             }
+            struct type *ty = buffer_top(*intermediates);
             if (em->multi_value_count == 0) {
-                /* TODO: infer type of the array based on this first entry. */
-                struct type *ty = buffer_top(*intermediates);
                 em->size = ty->total_size;
+                em->element_type = ty;
+            } else {
+                /* TODO: properly compare types to make sure the elements of
+                   the array all agree */
+                if (em->size != ty->total_size) {
+                    fprintf(stderr, "Error at line %d, %d: Array elements had "
+                        "different sizes.\n", in->data[i].tk.row,
+                        in->data[i].tk.column);
+                    exit(EXIT_FAILURE);
+                }
             }
             struct instruction instr;
             instr.op = OP_ARRAY_STORE;
@@ -548,8 +559,8 @@ void compile_expression(
             alloc_instr->flags = 0;
             alloc_instr->output.type = REF_TEMPORARY;
             alloc_instr->output.x = em.pointer_variable_index;
-            alloc_instr->arg1.type = REF_CONSTANT;
-            alloc_instr->arg1.x = em.size;
+            alloc_instr->arg1.type = REF_STATIC_POINTER;
+            alloc_instr->arg1.x = (int64)em.element_type;
             alloc_instr->arg2.type = REF_CONSTANT;
             alloc_instr->arg2.x = em.multi_value_count;
         } else if (in->data[i].tk.id == '}') {
