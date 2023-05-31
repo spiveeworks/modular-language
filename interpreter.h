@@ -244,7 +244,7 @@ void continue_execution(struct call_stack *stack) {
     while (stack->exec.count > 0) {
         struct execution_frame *frame = buffer_top(stack->exec);
         if (frame->current < 0 || frame->current >= frame->count) {
-            buffer_pop(stack->exec);
+            buffer_change_count(stack->exec, -1);
             continue;
         }
 
@@ -372,7 +372,7 @@ void continue_execution(struct call_stack *stack) {
             if (arg1 < 0 || arg1 >= output.shared_buff.count) {
                 fprintf(stderr, "Runtime error: Tried to write to index %lld "
                     "of an array of size %d.\n",
-                    arg1, output.shared_buff.count);
+                    (long long)arg1, output.shared_buff.count);
                 exit(EXIT_FAILURE);
             }
             /* TODO: check that the memory accessed is actually an initialised

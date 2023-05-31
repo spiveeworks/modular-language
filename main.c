@@ -37,26 +37,25 @@ str read_file(char *path) {
 }
 
 void print_ref(struct ref ref) {
-    if (ref.type == REF_STATIC_POINTER) {
+    switch (ref.type) {
+      case REF_STATIC_POINTER:
         printf("0x%p", (void*)ref.x);
         return;
-    }
-
-    switch (ref.type) {
       case REF_CONSTANT:
-        printf(" ");
+        printf(" %lld", (long long)ref.x);
         break;
       case REF_GLOBAL:
-        printf("g");
+        printf("g%lld", (long long)ref.x);
         break;
       case REF_LOCAL:
-        printf("l");
+        printf("l%lld", (long long)ref.x);
         break;
       case REF_TEMPORARY:
-        printf("v");
+        printf("v%lld", (long long)ref.x);
+        break;
+      default:
         break;
     }
-    printf("%lld", ref.x);
 }
 
 int main(int argc, char **argv) {
@@ -96,7 +95,7 @@ int main(int argc, char **argv) {
                     printf(")\n");
                 } else if (instr->op == OP_ARRAY_STORE) {
                     print_ref(instr->output);
-                    printf("[", instr->op);
+                    printf("[");
                     print_ref(instr->arg1);
                     printf("] = ");
                     print_ref(instr->arg2);
@@ -117,7 +116,8 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "Warning: Executing a statement resulted in "
                     "%llu global variables being initialized, when %llu "
                     "global variables are in scope.\n",
-                    call_stack.vars.global_count, bindings.global_count);
+                    (long long)call_stack.vars.global_count,
+                    (long long)bindings.global_count);
                 call_stack.vars.global_count = bindings.global_count;
             }
         } else if (item.type == ITEM_NULL) {
@@ -130,7 +130,7 @@ int main(int argc, char **argv) {
     printf("\nResults:\n");
     for (int i = 0; i < call_stack.vars.global_count; i++) {
         struct variable_data *it = &call_stack.vars.data[i];
-        printf("g%d = %lld\n", i, (int64)it->value.val64);
+        printf("g%d = %lld\n", i, (long long)it->value.val64);
     }
 
     return 0;

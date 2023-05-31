@@ -4,6 +4,7 @@
 #include "types.h"
 
 #include "tokenizer.h"
+#include "compiler_primitives.h"
 
 /* This file converts infix expressions into postfix RPN buffers, and also
    compiles RPN buffers into bytecode instructions. In this way we abstract
@@ -524,7 +525,7 @@ void compile_expression(
         } else if (in->data[i].tk.id == '[') {
             struct emplace_info *next_emplace = buffer_addn(emplace_stack, 1);
             next_emplace->alloc_instruction_index = out->count;
-            buffer_addn(*out, 1);
+            buffer_change_count(*out, 1);
             next_emplace->multi_value_count = 0;
             next_emplace->size = 0;
             next_emplace->is_array = true;

@@ -60,6 +60,10 @@ struct type get_type_info(
       case REF_TEMPORARY:
         result = intermediates->data[it.x];
         break;
+      default:
+        fprintf(stderr, "Error: Tried to infer type info from a ref with ref "
+            "type %d?\n", it.type);
+        exit(EXIT_FAILURE);
     }
     return result;
 }
