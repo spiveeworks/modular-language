@@ -141,14 +141,169 @@ struct expr_parse_result {
     int multi_value_count;
 };
 
-/* TODO: make the prefix -> infix -> prefix -> infix structure more clear by
-   pulling prefix parsing and infix parsing out into separate procedures.
-   From a code theory point of view, they would still be constraint-bearing
-   code, but they bear different kinds of constraints, and pulling them out
-   says "Hey! There's a different kind of thing happening here!"... More to the
-   point, though, it is a state machine, so the usual spaghetti cost of pulling
-   out functions is basically nonexistent anyway, since it is already FSM
-   spaghetti. */
+/* The basic heart beat of expression parsing: roughly every second token is in
+   "ref" position, usually either a literal or a variable, or an open
+   delimiter, and in between those are "op" position tokens, usually infix or
+   postfix operations, or close delimiters. Both of these are fairly simple
+   changes to the op stack/state machine, but then when close delimiters are
+   reached, and *finish* resolving down to a single subexpression, then a third
+   procedure comes in, the monster `resolve_closing_token` procedure. */
+void read_next_ref(
+    struct tokenizer *tokenizer,
+    struct op_stack *stack,
+    struct rpn_buffer *out
+) {
+    struct token tk = get_token(tokenizer);
+
+    if (tk.id == TOKEN_NUMERIC || tk.id == TOKEN_ALPHANUM) {
+        stack->next_ref.push = true;
+        stack->next_ref.tk = tk;
+        stack->have_next_ref = true;
+    } else if (tk.id == '(' || tk.id == '[' || tk.id == '{') {
+        /* Nothing to cascade, just push the paren and continue. */
+        struct partial_operation new;
+        new.op.type = RPN_GROUPING;
+        new.op.tk = tk;
+        new.op.multi_value_count = 0;
+        new.precedence = PRECEDENCE_GROUPING;
+        buffer_push(stack->lhs, new);
+
+        if (tk.id != '(') {
+            /* for '[' and '{' we actually want to store an atom in the
+               rpn_buffer straight away, so that the compiler can make
+               an instruction to allocate memory up front. */
+            buffer_push(*out, new.op);
+        }
+    } else {
+        fprintf(stderr, "Error on line %d, %d: Got unexpected "
+                "token \"", tk.row, tk.column);
+        fputstr(tk.it, stderr);
+        fprintf(stderr, "\" while parsing expression.\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void read_next_op(struct tokenizer *tokenizer, struct op_stack *stack) {
+    struct token tk = get_token(tokenizer);
+
+    for (int i = 0; i < ARRAY_LENGTH(precedence_info); i++) {
+        if (tk.id == precedence_info[i].operator) {
+            stack->next_op.type = RPN_BINARY;
+            stack->next_op.tk = tk;
+            stack->next_precedence = precedence_info[i].precedence;
+            stack->have_next_op = true;
+            break;
+        }
+    }
+    if (!stack->have_next_op) {
+        stack->have_closing_token = true;
+        stack->closing_token = tk;
+        if (tk.id == ')') stack->opening_id = '(';
+        else if (tk.id == ']') stack->opening_id = '[';
+        else if (tk.id == '}') stack->opening_id = '{';
+        else stack->opening_id = TOKEN_NULL;
+    }
+}
+
+bool resolve_closing_token(
+    struct op_stack *stack,
+    struct rpn_buffer *out,
+    int *final_multi_value_count
+) {
+    struct partial_operation *top = buffer_top(stack->lhs);
+    /* Can't pop any more, but have hit a delimiter or comma or
+       something, so handle the closing bracket or try and return a
+       final result or something. */
+    if (stack->closing_token.id == ',') {
+        push_rpn_ref(out, &stack->next_ref);
+        stack->have_next_ref = false;
+        if (top) {
+            if (top->precedence != PRECEDENCE_GROUPING) {
+                /* Should be impossible, but check anyway. */
+                fprintf(stderr, "Error: Hit a comma, and tried to "
+                        "push a value into a non-grouping token?\n");
+                exit(EXIT_FAILURE);
+            }
+            top->op.multi_value_count += 1;
+
+            if (top->op.tk.id == '(') {
+                fprintf(stderr, "Error at line %d, %d: There was a "
+                        "comma inside grouping parentheses.\n",
+                        top->op.tk.row, top->op.tk.column);
+                exit(EXIT_FAILURE);
+            }
+
+            /* Take the result that was just calculated, and write it
+               into whatever array or struct is being built. This is
+               denoted with a single comma token in the RPN buffer. */
+            struct rpn_atom *comma = buffer_addn(*out, 1);
+            comma->type = RPN_GROUPING;
+            comma->tk = stack->closing_token;
+        } else {
+            /* Just let the cascaded result exist on the stack. */
+            *final_multi_value_count += 1;
+        }
+
+        stack->have_closing_token = false;
+    } else if (stack->opening_id == TOKEN_NULL) {
+        if (top) {
+            fprintf(stderr, "Error on line %d, %d: Got unexpected "
+                    "token \"", stack->closing_token.row,
+                    stack->closing_token.column);
+            fputstr(stack->closing_token.it, stderr);
+            fprintf(stderr, "\" while parsing expression.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        push_rpn_ref(out, &stack->next_ref);
+        *final_multi_value_count += 1;
+
+        return true;
+    } else if (!top) {
+        fprintf(stderr, "Error on line %d, %d: Got unmatched "
+                "bracket \"", stack->closing_token.row, stack->closing_token.column);
+        fputstr(stack->closing_token.it, stderr);
+        fprintf(stderr, "\" while parsing expression.\n");
+        exit(EXIT_FAILURE);
+    } else if (stack->opening_id != top->op.tk.id) {
+        fprintf(stderr, "Error on line %d, %d: Got incorrectly "
+                "matched brackets \"%c\" and \"%c\" while parsing "
+                "expression.", stack->closing_token.row,
+                stack->closing_token.column, top->op.tk.id,
+                stack->closing_token.id);
+        exit(EXIT_FAILURE);
+    } else if (stack->closing_token.id == ')') {
+        /* Resolve the brackets. */
+        stack->lhs.count -= 1;
+        stack->have_closing_token = false;
+        /* Keep next_ref, as if the brackets had been replaced by a
+           single variable name. */
+    } else {
+        /* Push the value with one last comma, as if it were written
+           manually. */
+        push_rpn_ref(out, &stack->next_ref);
+        struct rpn_atom comma = {0};
+        comma.type = RPN_GROUPING;
+        comma.tk.id = ',';
+        buffer_push(*out, comma);
+        top->op.multi_value_count += 1;
+
+        struct rpn_atom close;
+        close.type = RPN_GROUPING;
+        close.tk = stack->closing_token;
+        close.multi_value_count = top->op.multi_value_count;
+        buffer_push(*out, close);
+
+        stack->next_ref.push = false;
+        stack->have_next_ref = true;
+
+        stack->lhs.count--;
+        stack->have_closing_token = false;
+    }
+
+    return false;
+}
+
 struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
     bool has_ref_decl = false;
     struct rpn_buffer out = {0};
@@ -183,53 +338,13 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
             stack.next_ref.push = false;
             stack.lhs.count--;
         } else if (stack.have_next_ref && stack.have_closing_token) {
-            /* Can't pop any more, but have hit a delimiter or comma or
-               something, so handle the closing bracket or try and return a
-               final result or something. */
-            if (stack.closing_token.id == ',') {
-                push_rpn_ref(&out, &stack.next_ref);
-                stack.have_next_ref = false;
-                if (top) {
-                    if (top->precedence != PRECEDENCE_GROUPING) {
-                        /* Should be impossible, but check anyway. */
-                        fprintf(stderr, "Error: Hit a comma, and tried to "
-                            "push a value into a non-grouping token?\n");
-                        exit(EXIT_FAILURE);
-                    }
-                    top->op.multi_value_count += 1;
+            bool done = resolve_closing_token(
+                &stack,
+                &out,
+                &final_multi_value_count
+            );
 
-                    if (top->op.tk.id == '(') {
-                        fprintf(stderr, "Error at line %d, %d: There was a "
-                            "comma inside grouping parentheses.\n",
-                            top->op.tk.row, top->op.tk.column);
-                        exit(EXIT_FAILURE);
-                    }
-
-                    /* Take the result that was just calculated, and write it
-                       into whatever array or struct is being built. This is
-                       denoted with a single comma token in the RPN buffer. */
-                    struct rpn_atom *comma = buffer_addn(out, 1);
-                    comma->type = RPN_GROUPING;
-                    comma->tk = stack.closing_token;
-                } else {
-                    /* Just let the cascaded result exist on the stack. */
-                    final_multi_value_count += 1;
-                }
-
-                stack.have_closing_token = false;
-            } else if (stack.opening_id == TOKEN_NULL) {
-                if (top) {
-                    fprintf(stderr, "Error on line %d, %d: Got unexpected "
-                        "token \"", stack.closing_token.row,
-                        stack.closing_token.column);
-                    fputstr(stack.closing_token.it, stderr);
-                    fprintf(stderr, "\" while parsing expression.\n");
-                    exit(EXIT_FAILURE);
-                }
-
-                push_rpn_ref(&out, &stack.next_ref);
-                final_multi_value_count += 1;
-
+            if (done) {
                 put_token_back(tokenizer, stack.closing_token);
 
                 /* Now finish up. */
@@ -241,97 +356,11 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
                 result.multi_value_count = final_multi_value_count;
 
                 return result;
-            } else if (!top) {
-                fprintf(stderr, "Error on line %d, %d: Got unmatched "
-                    "bracket \"", stack.closing_token.row, stack.closing_token.column);
-                fputstr(stack.closing_token.it, stderr);
-                fprintf(stderr, "\" while parsing expression.\n");
-                exit(EXIT_FAILURE);
-            } else if (stack.opening_id != top->op.tk.id) {
-                fprintf(stderr, "Error on line %d, %d: Got incorrectly "
-                    "matched brackets \"%c\" and \"%c\" while parsing "
-                    "expression.", stack.closing_token.row,
-                    stack.closing_token.column, top->op.tk.id,
-                    stack.closing_token.id);
-                exit(EXIT_FAILURE);
-            } else if (stack.closing_token.id == ')') {
-                /* Resolve the brackets. */
-                stack.lhs.count -= 1;
-                stack.have_closing_token = false;
-                /* Keep next_ref, as if the brackets had been replaced by a
-                   single variable name. */
-            } else {
-                /* Push the value with one last comma, as if it were written
-                   manually. */
-                push_rpn_ref(&out, &stack.next_ref);
-                struct rpn_atom comma = {0};
-                comma.type = RPN_GROUPING;
-                comma.tk.id = ',';
-                buffer_push(out, comma);
-                top->op.multi_value_count += 1;
-
-                struct rpn_atom close;
-                close.type = RPN_GROUPING;
-                close.tk = stack.closing_token;
-                close.multi_value_count = top->op.multi_value_count;
-                buffer_push(out, close);
-
-                stack.next_ref.push = false;
-                stack.have_next_ref = true;
-
-                stack.lhs.count--;
-                stack.have_closing_token = false;
             }
         } else if (!stack.have_next_ref) {
-            struct token tk = get_token(tokenizer);
-
-            if (tk.id == TOKEN_NUMERIC || tk.id == TOKEN_ALPHANUM) {
-                stack.next_ref.push = true;
-                stack.next_ref.tk = tk;
-                stack.have_next_ref = true;
-            } else if (tk.id == '(' || tk.id == '[' || tk.id == '{') {
-                /* Nothing to cascade, just push the paren and continue. */
-                struct partial_operation new;
-                new.op.type = RPN_GROUPING;
-                new.op.tk = tk;
-                new.op.multi_value_count = 0;
-                new.precedence = PRECEDENCE_GROUPING;
-                buffer_push(stack.lhs, new);
-
-                if (tk.id != '(') {
-                    /* for '[' and '{' we actually want to store an atom in the
-                       rpn_buffer straight away, so that the compiler can make
-                       an instruction to allocate memory up front. */
-                    buffer_push(out, new.op);
-                }
-            } else {
-                fprintf(stderr, "Error on line %d, %d: Got unexpected "
-                    "token \"", tk.row, tk.column);
-                fputstr(tk.it, stderr);
-                fprintf(stderr, "\" while parsing expression.\n");
-                exit(EXIT_FAILURE);
-            }
+            read_next_ref(tokenizer, &stack, &out);
         } else if (!stack.have_next_op) {
-            struct token tk = get_token(tokenizer);
-            enum token_id op = tk.id;
-
-            for (int i = 0; i < ARRAY_LENGTH(precedence_info); i++) {
-                if (tk.id == precedence_info[i].operator) {
-                    stack.next_op.type = RPN_BINARY;
-                    stack.next_op.tk = tk;
-                    stack.next_precedence = precedence_info[i].precedence;
-                    stack.have_next_op = true;
-                    break;
-                }
-            }
-            if (!stack.have_next_op) {
-                stack.have_closing_token = true;
-                stack.closing_token = tk;
-                if (tk.id == ')') stack.opening_id = '(';
-                else if (tk.id == ']') stack.opening_id = '[';
-                else if (tk.id == '}') stack.opening_id = '{';
-                else stack.opening_id = TOKEN_NULL;
-            }
+            read_next_op(tokenizer, &stack);
         } else {
             /* We have a ref and an operation, and they didn't cause anything
                to pop, so push instead, and try again. */

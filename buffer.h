@@ -2,7 +2,7 @@
 #define MODLANG_BUFFER_H
 
 #define buffer_setcap(A, N) ((A).data = array_realloc_proc((A).data, sizeof(*(A).data), (A).capacity, (N)), (A).capacity = (N), (A).data)
-#define buffer_grow(A, N) (buffer_grow_proc(&(A).data, sizeof(*(A).data), &(A).capacity, (N)))
+#define buffer_grow(A, N) (buffer_grow_proc((void**)&(A).data, sizeof(*(A).data), &(A).capacity, (N)))
 
 #define buffer_reserve(A, N) ((A).capacity < (N) ? buffer_setcap((A), (N)) : 0)
 #define buffer_maybe_grow(A, N) ((A).capacity < (A).count + (N) ? buffer_grow((A), (N)) : 0)
