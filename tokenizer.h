@@ -42,6 +42,7 @@ struct token_definition compound_operators[] = {
     {">=", TOKEN_GEQ},
     {"<<", TOKEN_LSHIFT},
     {">>", TOKEN_RSHIFT},
+    {"++", TOKEN_CONCAT},
 };
 
 struct token get_token(struct tokenizer *tk) {

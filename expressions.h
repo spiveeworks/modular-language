@@ -42,8 +42,7 @@ struct rpn_atom {
     enum rpn_atom_type type;
     struct token tk;
     int multi_value_count;
-    /* bool is_postfix_grouping; or something, for f(x) and arr[i], etc. or
-       maybe this should be another rpn_atom_type? */
+    bool is_postfix;
 };
 
 /* This is like our AST, but we will be compiling it as soon as possible. */
@@ -84,6 +83,7 @@ struct precedence_info {
     {'^', PRECEDENCE_ADDITIVE},
     {'+', PRECEDENCE_ADDITIVE},
     {'-', PRECEDENCE_ADDITIVE},
+    {TOKEN_CONCAT, PRECEDENCE_ADDITIVE},
     {TOKEN_LSHIFT, PRECEDENCE_MULTIPLICATIVE},
     {TOKEN_RSHIFT, PRECEDENCE_MULTIPLICATIVE},
     {'&', PRECEDENCE_MULTIPLICATIVE},
@@ -157,6 +157,8 @@ void read_next_ref(
     struct token tk = get_token(tokenizer);
 
     if (tk.id == TOKEN_NUMERIC || tk.id == TOKEN_ALPHANUM) {
+        /* Standard ref position token, record it and proceed to the cascade
+           part of the loop */
         stack->next_ref.push = true;
         stack->next_ref.tk = tk;
         stack->have_next_ref = true;
@@ -166,6 +168,7 @@ void read_next_ref(
         new.op.type = RPN_GROUPING;
         new.op.tk = tk;
         new.op.multi_value_count = 0;
+        new.op.is_postfix = false;
         new.precedence = PRECEDENCE_GROUPING;
         buffer_push(stack->lhs, new);
 
@@ -176,6 +179,8 @@ void read_next_ref(
             buffer_push(*out, new.op);
         }
     } else {
+        /* We MUST get a ref if we are at the start of an expression, or if we
+           just got an infix operator. Anything else is therefore an error. */
         fprintf(stderr, "Error on line %d, %d: Got unexpected "
                 "token \"", tk.row, tk.column);
         fputstr(tk.it, stderr);
@@ -184,26 +189,53 @@ void read_next_ref(
     }
 }
 
-void read_next_op(struct tokenizer *tokenizer, struct op_stack *stack) {
+void read_next_op(
+    struct tokenizer *tokenizer,
+    struct op_stack *stack,
+    struct rpn_buffer *out
+) {
     struct token tk = get_token(tokenizer);
 
+    /* infix operators */
     for (int i = 0; i < ARRAY_LENGTH(precedence_info); i++) {
         if (tk.id == precedence_info[i].operator) {
             stack->next_op.type = RPN_BINARY;
             stack->next_op.tk = tk;
             stack->next_precedence = precedence_info[i].precedence;
             stack->have_next_op = true;
-            break;
+            return;
         }
     }
-    if (!stack->have_next_op) {
-        stack->have_closing_token = true;
-        stack->closing_token = tk;
-        if (tk.id == ')') stack->opening_id = '(';
-        else if (tk.id == ']') stack->opening_id = '[';
-        else if (tk.id == '}') stack->opening_id = '{';
-        else stack->opening_id = TOKEN_NULL;
+
+    /* postfix delimiters */
+    if (tk.id == '[') {
+        struct partial_operation new;
+        new.arg = stack->next_ref;
+        new.op.type = RPN_GROUPING;
+        new.op.tk = tk;
+        new.op.multi_value_count = 0;
+        new.op.is_postfix = true;
+        new.precedence = PRECEDENCE_GROUPING;
+        buffer_push(stack->lhs, new);
+
+        stack->have_next_ref = false;
+
+        /* Push the opening bracket, to help with parsing. */
+        /* This is the only place we use `out` in this procedure, and it is
+           kind of unnecessary... Ah well. */
+        buffer_push(*out, new.op);
+
+        /* Still have no op. Proceed to ref position. */
+        return;
     }
+
+    /* either a closing delimiter, or the end of the expression */
+    stack->have_closing_token = true;
+    stack->closing_token = tk;
+    if (tk.id == ')') stack->opening_id = '(';
+    else if (tk.id == ']') stack->opening_id = '[';
+    else if (tk.id == '}') stack->opening_id = '{';
+    else stack->opening_id = TOKEN_NULL;
 }
 
 bool resolve_closing_token(
@@ -285,7 +317,8 @@ bool resolve_closing_token(
         push_rpn_ref(out, &stack->next_ref);
         struct rpn_atom comma = {0};
         comma.type = RPN_GROUPING;
-        comma.tk.id = ',';
+        comma.tk = stack->closing_token; /* For file location info. */
+        comma.tk.id = ','; /* For actual parsing logic. */
         buffer_push(*out, comma);
         top->op.multi_value_count += 1;
 
@@ -295,9 +328,25 @@ bool resolve_closing_token(
         close.multi_value_count = top->op.multi_value_count;
         buffer_push(*out, close);
 
+        if (top->op.is_postfix) {
+            push_rpn_ref(out, &top->arg);
+            struct rpn_atom apply;
+            if (top->arg.push) {
+                apply.type = RPN_BINARY_REVERSE;
+            } else {
+                apply.type = RPN_BINARY;
+            }
+            apply.tk = top->op.tk;
+
+            buffer_push(*out, apply);
+        }
+
+        /* Whatever just happened, it gave us an expression, that might fill
+           further holes on the left or the right. */
         stack->next_ref.push = false;
         stack->have_next_ref = true;
 
+        /* And now those opening and closing tokens are resolved. */
         stack->lhs.count--;
         stack->have_closing_token = false;
     }
@@ -361,7 +410,7 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
         } else if (!stack.have_next_ref) {
             read_next_ref(tokenizer, &stack, &out);
         } else if (!stack.have_next_op) {
-            read_next_op(tokenizer, &stack);
+            read_next_op(tokenizer, &stack, &out);
         } else {
             /* We have a ref and an operation, and they didn't cause anything
                to pop, so push instead, and try again. */
@@ -383,13 +432,21 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
 /* Expression Compiler */
 /***********************/
 
+/* TODO: Should really name this stuff multivalue_etc, because it isn't always
+   about emplacement, even thought emplacement was the first case I had to make
+   this stack to handle. Or... maybe it should just be emplacement? */
+enum emplace_type {
+    EMPLACE_ARRAY,
+    EMPLACE_INDEX,
+};
+
 struct emplace_info {
     size_t alloc_instruction_index;
     size_t pointer_variable_index; /* The temp/intermediate index of the output
                                       pointer. */
     int multi_value_count;
     int size; /* Total size for structs, per-element size for arrays. */
-    bool is_array;
+    enum emplace_type emplace_type;
     struct type *element_type;
 };
 
@@ -524,17 +581,24 @@ void compile_expression(
             exit(EXIT_FAILURE);
         } else if (in->data[i].tk.id == '[') {
             struct emplace_info *next_emplace = buffer_addn(emplace_stack, 1);
-            next_emplace->alloc_instruction_index = out->count;
-            buffer_change_count(*out, 1);
+
+            if (in->data[i].is_postfix) {
+                next_emplace->alloc_instruction_index = -1;
+                next_emplace->emplace_type = EMPLACE_INDEX;
+            } else {
+                next_emplace->alloc_instruction_index = out->count;
+                buffer_change_count(*out, 1);
+                next_emplace->emplace_type = EMPLACE_ARRAY;
+
+                /* TODO: how do I handle these array types?? What kinds of type
+                   inference am I planning on having? */
+                next_emplace->pointer_variable_index = intermediates->count;
+                struct type array_type = type_array_of(type_int64);
+                buffer_push(*intermediates, array_type);
+            }
+
             next_emplace->multi_value_count = 0;
             next_emplace->size = 0;
-            next_emplace->is_array = true;
-
-            /* TODO: how do I handle these array types?? What kinds of type
-               inference am I planning on having? */
-            next_emplace->pointer_variable_index = intermediates->count;
-            struct type array_type = type_array_of(type_int64);
-            buffer_push(*intermediates, array_type);
         } else if (in->data[i].tk.id == '{') {
             fprintf(stderr, "Error: Struct literals are not yet "
                 "implemented.\n");
@@ -547,33 +611,44 @@ void compile_expression(
                     in->data[i].tk.column);
                 exit(EXIT_FAILURE);
             }
-            struct type *ty = buffer_top(*intermediates);
-            if (em->multi_value_count == 0) {
-                em->size = ty->total_size;
-                em->element_type = ty;
-            } else {
-                /* TODO: properly compare types to make sure the elements of
-                   the array all agree */
-                if (em->size != ty->total_size) {
-                    fprintf(stderr, "Error at line %d, %d: Array elements had "
-                        "different sizes.\n", in->data[i].tk.row,
-                        in->data[i].tk.column);
-                    exit(EXIT_FAILURE);
+            if (em->emplace_type == EMPLACE_ARRAY) {
+                struct type *ty = buffer_top(*intermediates);
+                if (em->multi_value_count == 0) {
+                    em->size = ty->total_size;
+                    em->element_type = ty;
+                } else {
+                    /* TODO: properly compare types to make sure the elements of
+                       the array all agree */
+                    if (em->size != ty->total_size) {
+                        fprintf(stderr, "Error at line %d, %d: Array elements had "
+                            "different sizes.\n", in->data[i].tk.row,
+                            in->data[i].tk.column);
+                        exit(EXIT_FAILURE);
+                    }
                 }
+                struct instruction instr;
+                instr.op = OP_ARRAY_STORE;
+                instr.flags = OP_64BIT;
+                instr.output.type = REF_TEMPORARY;
+                instr.output.x = em->pointer_variable_index;
+                instr.arg1.type = REF_CONSTANT;
+                instr.arg1.x = em->multi_value_count;
+                /* TODO: rearrange this whole thing to store refs in a stack, and
+                   pop arg2 from that. */
+                instr.arg2.type = REF_TEMPORARY;
+                instr.arg2.x = intermediates->count - 1;
+                buffer_push(*out, instr);
+                intermediates->count -= 1;
+            } else if (em->emplace_type == EMPLACE_INDEX) {
+                /* Do nothing, just leave the value on the stack, and continue
+                   to count the multi-values. */
+            } else {
+                fprintf(stderr, "Error at line %d, %d: Multi-value "
+                    "encountered with unknown emplace type %d.\n",
+                    in->data[i].tk.row, in->data[i].tk.column,
+                    em->emplace_type);
+                exit(EXIT_FAILURE);
             }
-            struct instruction instr;
-            instr.op = OP_ARRAY_STORE;
-            instr.flags = OP_64BIT;
-            instr.output.type = REF_TEMPORARY;
-            instr.output.x = em->pointer_variable_index;
-            instr.arg1.type = REF_CONSTANT;
-            instr.arg1.x = em->multi_value_count;
-            /* TODO: rearrange this whole thing to store refs in a stack, and
-               pop arg2 from that. */
-            instr.arg2.type = REF_TEMPORARY;
-            instr.arg2.x = intermediates->count - 1;
-            buffer_push(*out, instr);
-            intermediates->count -= 1;
             em->multi_value_count += 1;
         } else if (in->data[i].tk.id == ']') {
             if (emplace_stack.count <= 0) {
@@ -583,16 +658,30 @@ void compile_expression(
             }
             struct emplace_info em = buffer_pop(emplace_stack);
 
-            struct instruction *alloc_instr =
-                &out->data[em.alloc_instruction_index];
-            alloc_instr->op = OP_ARRAY_ALLOC;
-            alloc_instr->flags = 0;
-            alloc_instr->output.type = REF_TEMPORARY;
-            alloc_instr->output.x = em.pointer_variable_index;
-            alloc_instr->arg1.type = REF_STATIC_POINTER;
-            alloc_instr->arg1.x = (int64)em.element_type;
-            alloc_instr->arg2.type = REF_CONSTANT;
-            alloc_instr->arg2.x = em.multi_value_count;
+            if (em.emplace_type == EMPLACE_ARRAY) {
+                struct instruction *alloc_instr =
+                    &out->data[em.alloc_instruction_index];
+                alloc_instr->op = OP_ARRAY_ALLOC;
+                alloc_instr->flags = 0;
+                alloc_instr->output.type = REF_TEMPORARY;
+                alloc_instr->output.x = em.pointer_variable_index;
+                alloc_instr->arg1.type = REF_STATIC_POINTER;
+                alloc_instr->arg1.x = (int64)em.element_type;
+                alloc_instr->arg2.type = REF_CONSTANT;
+                alloc_instr->arg2.x = em.multi_value_count;
+            } else if (em.emplace_type == EMPLACE_INDEX) {
+                if (em.multi_value_count != 1) {
+                    fprintf(stderr, "Error at line %d, %d: Array index "
+                        "operations must be a single index.\n",
+                        in->data[i].tk.row, in->data[i].tk.column);
+                    exit(EXIT_FAILURE);
+                }
+
+                /* Don't actually do anything. The comma operators have been
+                   pushing to the stack, and there was only one thing pushed,
+                   so now we can just continue as if this were setting up for a
+                   normal stack-based binary operation. */
+            }
         } else if (in->data[i].tk.id == '}') {
             fprintf(stderr, "Error: Struct literals are not yet "
                 "implemented.\n");

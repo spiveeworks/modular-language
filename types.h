@@ -56,7 +56,7 @@ int64 integer_from_string(str it) {
     for (int i = 0; i < it.length; i++) {
         char c = it.data[i];
         /* This condition is later used to define the IS_NUM macro. */
-        if (c > '0' && c <= '9') {
+        if ('0' <= c && c <= '9') {
             result *= 10;
             result += c - '0';
         } else {
@@ -98,6 +98,7 @@ enum token_id {
     TOKEN_GEQ,
     TOKEN_LSHIFT,
     TOKEN_RSHIFT,
+    TOKEN_CONCAT,
 
     TOKEN_FUNC,
     TOKEN_VAR,
@@ -223,6 +224,8 @@ enum operation {
 
     OP_ARRAY_ALLOC,
     OP_ARRAY_STORE,
+    OP_ARRAY_INDEX,
+    OP_ARRAY_CONCAT,
 };
 
 enum operation_flags {

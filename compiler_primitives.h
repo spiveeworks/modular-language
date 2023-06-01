@@ -31,6 +31,11 @@ struct operator_info binary_ops[] = {
     {'*', OP_MUL, true, true},
     {'/', OP_DIV, false, true, true, true},
     {'%', OP_MOD, false, true, true, true},
+    {TOKEN_CONCAT, OP_ARRAY_CONCAT},
+    /* Postfix delimiters are parsed as both the start of grouping, and as a
+       binary application/index operation. These entries represent this latter 
+       meaning as application/indexing. */
+    {'[', OP_ARRAY_INDEX}
 };
 
 /*
@@ -162,26 +167,48 @@ void compile_operation(
         fprintf(stderr, "Error: Ran out of temporaries??\n");
         exit(EXIT_FAILURE);
     }
-    /* Make a combined rpn_ref -> {ref, type} compile function? */
+
+    /* Maybe make a combined rpn_ref -> {ref, type} compile function? */
     struct type arg1_type =
         get_type_info(bindings, intermediates, result.arg1);
     struct type arg2_type =
         get_type_info(bindings, intermediates, result.arg2);
 
-    /* Casing all the scalar connectives sounds annoying. Maybe I should make
-       the connective "scalar", or work out some bit mask trick to test them
-       all in one go. */
-    if (arg1_type.connective != TYPE_INT || arg2_type.connective != TYPE_INT) {
-        fprintf(stderr, "Error: Argument to operator %c must be an integer.\n",
-            operation.id);
-        exit(EXIT_FAILURE);
+    if (op->opcode == OP_ARRAY_INDEX) {
+        /* Casing all the scalar connectives sounds annoying. Maybe I should
+           make the connective "scalar", or work out some bit mask trick to
+           test them all in one go. */
+        if (arg1_type.connective != TYPE_ARRAY) {
+            fprintf(stderr, "Error: Left side of array index must be an "
+                "array.\n");
+            exit(EXIT_FAILURE);
+        }
+        if (arg2_type.connective != TYPE_INT) {
+            fprintf(stderr, "Error: Array index must be an integer.\n");
+            exit(EXIT_FAILURE);
+        }
+        if (arg2_type.word_size != 3) {
+            fprintf(stderr, "Error: Currently only 64 bit integer types are "
+                    "implemented.\n");
+            exit(EXIT_FAILURE);
+        }
+        result.flags = OP_64BIT;
+    } else {
+        /* Casing all the scalar connectives sounds annoying. Maybe I should
+           make the connective "scalar", or work out some bit mask trick to
+           test them all in one go. */
+        if (arg1_type.connective != TYPE_INT || arg2_type.connective != TYPE_INT) {
+            fprintf(stderr, "Error: Argument to operator %c must be an integer.\n",
+                    operation.id);
+            exit(EXIT_FAILURE);
+        }
+        if (arg1_type.word_size != 3 || arg2_type.word_size != 3) {
+            fprintf(stderr, "Error: Currently only 64 bit integer types are "
+                    "implemented.\n");
+            exit(EXIT_FAILURE);
+        }
+        result.flags = OP_64BIT;
     }
-    if (arg1_type.word_size != 3 || arg2_type.word_size != 3) {
-        fprintf(stderr, "Error: Currently only 64 bit integer types are "
-            "implemented.\n");
-        exit(EXIT_FAILURE);
-    }
-    result.flags = OP_64BIT;
 
     result.output.type = REF_TEMPORARY;
     result.output.x = intermediate_count;
