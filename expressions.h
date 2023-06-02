@@ -615,7 +615,11 @@ void compile_expression(
                 struct type *ty = buffer_top(*intermediates);
                 if (em->multi_value_count == 0) {
                     em->size = ty->total_size;
-                    em->element_type = ty;
+
+                    /* TODO: actually garbage collect this type info?? idk */
+                    em->element_type = malloc(sizeof(struct type));
+                    *em->element_type = *ty;
+                    *intermediates->data[em->pointer_variable_index].inner = *ty;
                 } else {
                     /* TODO: properly compare types to make sure the elements of
                        the array all agree */

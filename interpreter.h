@@ -30,6 +30,12 @@ struct shared_buff {
     int32 count;
 };
 
+void print_ref_count(struct shared_buff_header *header) {
+    if (header) {
+        printf("ref count at %p is now %d\n", header, header->references);
+    }
+}
+
 /* Allocate a shared buffer big enough to hold count elements each of the
    specified size. */
 struct shared_buff shared_buff_alloc(struct type *elem_type, int count) {
@@ -41,6 +47,8 @@ struct shared_buff shared_buff_alloc(struct type *elem_type, int count) {
     ptr->start_offset = 0;
     ptr->count = count;
     ptr->buffer_size = elem_size * count;
+    print_ref_count(ptr);
+    printf("count is %d\n", count);
 
     struct shared_buff result = {ptr, 0, count};
     return result;
@@ -52,6 +60,7 @@ void shared_buff_decrement(struct shared_buff_header *ptr) {
     struct type *elem_type = ptr->element_type;
 
     ptr->references -= 1;
+    print_ref_count(ptr);
     if (ptr->references <= 0) {
         if (elem_type->connective == TYPE_ARRAY) {
             uint8 *buff_start = (uint8*)&ptr[1];
@@ -70,6 +79,34 @@ void shared_buff_decrement(struct shared_buff_header *ptr) {
         }
 
         free(ptr);
+    }
+}
+
+void *shared_buff_get_index(struct shared_buff buff, int index) {
+    if (index < 0 || index >= buff.count) {
+        fprintf(stderr, "Runtime error: Tried to access index %lld of an "
+            "array of size %d.\n", (long long)index, buff.count);
+        exit(EXIT_FAILURE);
+    }
+    struct type *element_type = buff.ptr->element_type;
+    uint8 *data = (uint8*)&buff.ptr[1];
+    data += buff.start_offset;
+    data += element_type->total_size * index;
+    return data;
+}
+
+void copy_vals(struct type *element_type, void *dest, void *source, int count) {
+    memcpy(dest, source, count * element_type->total_size);
+    if (element_type->connective == TYPE_ARRAY) {
+        struct shared_buff *buffs = source;
+        for (int i = 0; i < count; i++) {
+            struct shared_buff_header *header = buffs[i].ptr;
+            if (header) header->references += 1;
+            print_ref_count(header);
+            printf("count is %d\n", buffs[i].count);
+        }
+    } else if (element_type->connective != TYPE_INT) {
+        fprintf(stderr, "Error: Copying aggregate data is not yet implemented.\n");
     }
 }
 
@@ -279,6 +316,8 @@ void continue_execution(struct call_stack *stack) {
                         exit(EXIT_FAILURE);
                     }
                     result.shared_buff.ptr->references += 1;
+                    print_ref_count(result.shared_buff.ptr);
+                    printf("count is %d\n", result.shared_buff.count);
                 }
             }
             break;
@@ -369,37 +408,56 @@ void continue_execution(struct call_stack *stack) {
             /* TODO: check that the 'output' array is a shared_buff. */
             union variable_contents output =
                 read_ref(frame, &stack->vars, next->output, NULL);
-            if (arg1 < 0 || arg1 >= output.shared_buff.count) {
-                fprintf(stderr, "Runtime error: Tried to write to index %lld "
-                    "of an array of size %d.\n",
-                    (long long)arg1, output.shared_buff.count);
-                exit(EXIT_FAILURE);
-            }
             /* TODO: check that the memory accessed is actually an initialised
                and aligned part of the buffer. */
-            uint8 *buffer = (uint8*)&output.shared_buff.ptr[1];
-            uint8 *data = &buffer[output.shared_buff.start_offset];
-            /* TODO: break this instruction up into three,
-                1. calculate the memory offset, (may be const-folded, or MADed)
-                2. get a ref to that location
-                3. use a scalar-write or shared_buff-write or memcpy
-                   instruction to effect the store.
-               That way the mem_modes remain purely a robustness/correctness
-               thing. */
-            switch (arg2_mode) {
-            case VARIABLE_DIRECT_VALUE:
-                ((int64*)data)[arg1] = arg2;
-                break;
-            case VARIABLE_REFCOUNT:
-                ((struct shared_buff*)data)[arg1] = arg2_full.shared_buff;
-                break;
-            default:
-                fprintf(stderr, "Error: Currently only scalars and arrays can "
-                    "be written to arrays.\n");
-                exit(EXIT_FAILURE);
-            }
+            uint8 *data = shared_buff_get_index(output.shared_buff, arg1);
+            struct type *element_type = output.shared_buff.ptr->element_type;
+            copy_vals(element_type, data, arg2_full.bytes, 1);
             /* Stop the array variable from being overwritten. */
             output_ref.type = REF_NULL;
+            break;
+          }
+        case OP_ARRAY_INDEX:
+          {
+            /* TODO: check that the memory accessed is actually an initialised
+               and aligned part of the buffer. */
+            uint8 *data = shared_buff_get_index(arg1_full.shared_buff, arg2);
+            struct type *element_type = arg1_full.shared_buff.ptr->element_type;
+            if (element_type->total_size > 16) {
+                fprintf(stderr, "Error: Arrays of structs are not implemented.\n");
+                exit(EXIT_FAILURE);
+            }
+            copy_vals(element_type, result.bytes, data, 1);
+            if (element_type->connective == TYPE_ARRAY) {
+                result_mode = VARIABLE_REFCOUNT;
+            } else if (element_type->connective != TYPE_INT) {
+                fprintf(stderr, "Warning: Array contains types other than "
+                    "arrays or ints, runtime may leak it.\n");
+            }
+            break;
+          }
+        case OP_ARRAY_CONCAT:
+          {
+            /* TODO: check that the two arrays have the same type? Is this
+               guaranteed? */
+            struct type *element_type = arg1_full.shared_buff.ptr->element_type;
+
+            int arg1_count = arg1_full.shared_buff.count;
+            int arg2_count = arg2_full.shared_buff.count;
+            int result_count = arg1_count + arg2_count;
+            result.shared_buff = shared_buff_alloc(element_type, result_count);
+            result_mode = VARIABLE_REFCOUNT;
+
+            /* TODO: do these need to be checked? Or can we get more lean?
+               Inlining may resolve this anyway. */
+            uint8 *source_1 = shared_buff_get_index(arg1_full.shared_buff, 0);
+            uint8 *dest_1 = shared_buff_get_index(result.shared_buff, 0);
+            copy_vals(element_type, dest_1, source_1, arg1_count);
+
+            uint8 *source_2 = shared_buff_get_index(arg2_full.shared_buff, 0);
+            uint8 *dest_2 = shared_buff_get_index(result.shared_buff, arg1_count);
+            copy_vals(element_type, dest_2, source_2, arg2_count);
+
             break;
           }
         default:

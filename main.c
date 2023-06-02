@@ -58,6 +58,39 @@ void print_ref(struct ref ref) {
     }
 }
 
+void print_array(struct shared_buff buff) {
+    printf("[");
+    if (buff.ptr) {
+        struct type *element_type = buff.ptr->element_type;
+        switch (element_type->connective) {
+        case TYPE_INT:
+          {
+            int64 *arr = shared_buff_get_index(buff, 0);
+            for (int i = 0; i < buff.count; i++) {
+                if (i > 0) printf(", ");
+                printf("%lld", (long long)arr[i]);
+            }
+            break;
+          }
+        case TYPE_ARRAY:
+          {
+            struct shared_buff *arr = shared_buff_get_index(buff, 0);
+            for (int i = 0; i < buff.count; i++) {
+                if (i > 0) printf(", ");
+                print_array(arr[i]);
+            }
+            break;
+          }
+        default:
+            for (int i = 0; i < buff.count; i++) {
+                if (i > 0) printf(", ");
+                printf("?");
+            }
+        }
+    }
+    printf("]");
+}
+
 int main(int argc, char **argv) {
     if (argc == 1) {
         fprintf(stderr, "Error: Expected input file.\n");
@@ -130,7 +163,13 @@ int main(int argc, char **argv) {
     printf("\nResults:\n");
     for (int i = 0; i < call_stack.vars.global_count; i++) {
         struct variable_data *it = &call_stack.vars.data[i];
-        printf("g%d = %lld\n", i, (long long)it->value.val64);
+        printf("g%d = ", i);
+        if (it->mem_mode == VARIABLE_REFCOUNT) {
+            print_array(it->value.shared_buff);
+        } else {
+            printf("%lld", (long long)it->value.val64);
+        }
+        printf("\n");
     }
 
     return 0;

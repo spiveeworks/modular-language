@@ -174,6 +174,8 @@ void compile_operation(
     struct type arg2_type =
         get_type_info(bindings, intermediates, result.arg2);
 
+    struct type result_type = type_int64;
+
     if (op->opcode == OP_ARRAY_INDEX) {
         /* Casing all the scalar connectives sounds annoying. Maybe I should
            make the connective "scalar", or work out some bit mask trick to
@@ -193,6 +195,19 @@ void compile_operation(
             exit(EXIT_FAILURE);
         }
         result.flags = OP_64BIT;
+
+        result_type = *arg1_type.inner;
+    } else if (op->opcode == OP_ARRAY_CONCAT) {
+        if (arg1_type.connective != TYPE_ARRAY || arg2_type.connective != TYPE_ARRAY) {
+            fprintf(stderr, "Error: Arguments to ++ operator must be "
+                "arrays.\n");
+            exit(EXIT_FAILURE);
+        }
+        /* TODO: check the array types agree. */
+        fprintf(stderr, "Warning: Currently array concat is not type "
+            "checked.\n");
+
+        result_type = arg1_type;
     } else {
         /* Casing all the scalar connectives sounds annoying. Maybe I should
            make the connective "scalar", or work out some bit mask trick to
@@ -216,11 +231,16 @@ void compile_operation(
     buffer_push(*out, result);
 
     while (intermediates->count > intermediate_count) {
-        destroy_type(buffer_top(*intermediates));
+        /* We should be managing these intermediate types, but they get shared
+           by emplace logic and thus by array_alloc instructions, so really
+           they need to be shared, or deep cloned each time. Shared probably
+           makes sense, but then what is the lifetime for the code that we
+           generate?? Indefinite? */
+        /* destroy_type(buffer_top(*intermediates)); */
         intermediates->count -= 1;
     }
 
-    buffer_push(*intermediates, type_int64);
+    buffer_push(*intermediates, result_type);
 }
 
 #endif
