@@ -13,29 +13,6 @@
 #include "statements.h"
 #include "interpreter.h"
 
-str read_file(char *path) {
-    FILE *input = NULL;
-    str contents;
-
-    /* Open in binary mode, since we already tokenize the \r\n ourselves. */
-    input = fopen(path, "rb");
-    if (!input) {
-        perror("error opening file");
-    }
-
-    fseek(input, 0L, SEEK_END);
-    contents.length = ftell(input);
-    contents.data = malloc(contents.length + 1);
-
-    rewind(input);
-    contents.length = fread(contents.data, 1, contents.length, input);
-    contents.data[contents.length] = '\0';
-
-    fclose(input);
-
-    return contents;
-}
-
 void print_ref(struct ref ref) {
     switch (ref.type) {
       case REF_STATIC_POINTER:
@@ -92,18 +69,26 @@ void print_array(struct shared_buff buff) {
 }
 
 int main(int argc, char **argv) {
-    if (argc == 1) {
-        fprintf(stderr, "Error: Expected input file.\n");
-        exit(EXIT_FAILURE);
-    }
     if (argc > 2) {
         fprintf(stderr, "Error: Too many arguments.\n");
         exit(EXIT_FAILURE);
     }
 
-    str input = read_file(argv[1]);
+    FILE *input;
+    bool repl;
+    if (argc == 1) {
+        input = stdin;
+        repl = true;
+    } else {
+        input = fopen(argv[1], "rb");
+        if (!input) {
+            fprintf(stderr, "Error: couldn't open file \"%s\"\n", argv[1]);
+            exit(EXIT_FAILURE);
+        }
+        repl = false;
+    }
 
-    struct tokenizer tokenizer = start_tokenizer(input);
+    struct tokenizer tokenizer = start_tokenizer(input, repl);
     struct record_table bindings = {0};
     struct call_stack call_stack = {0};
 

@@ -3,19 +3,65 @@
 
 #include "types.h"
 
+struct char_buffer {
+    char *data;
+    size_t count;
+    size_t capacity;
+};
+
 struct tokenizer {
-    char *next;
-    char *end;
+    FILE *input;
+    bool repl;
+
     int row;
     int column;
+
+    bool eof;
+    struct char_buffer blob;
+    size_t blob_chars_read;
 
     bool has_peek_token;
     struct token peek_token;
 };
 
-struct tokenizer start_tokenizer(str input) {
+struct tokenizer start_tokenizer(FILE *input, bool repl) {
     /* Make sure to start on line 1! */
-    return (struct tokenizer){input.data, input.data + input.length, 1, 0};
+    return (struct tokenizer){input, repl, 1, 0};
+}
+
+void tokenizer_read_input(struct tokenizer *tk) {
+    int remaining_count = tk->blob.count - tk->blob_chars_read;
+    if (remaining_count < 0) remaining_count = 0;
+    if (remaining_count > 0) {
+        memmove(
+            tk->blob.data,
+            tk->blob.data + tk->blob_chars_read,
+            remaining_count
+        );
+    }
+    tk->blob.count = remaining_count;
+    tk->blob_chars_read = 0;
+
+    buffer_reserve(tk->blob, 128);
+
+    if (fgets(tk->blob.data, tk->blob.capacity - remaining_count, tk->input)) {
+        tk->blob.count += strlen(tk->blob.data);
+    } else {
+        tk->eof = true;
+    }
+}
+
+char tokenizer_peek_char(struct tokenizer *tk) {
+    if (tk->blob_chars_read >= tk->blob.count) {
+        /* The buffer is out of characters. If the file isn't already out of
+           characters, read some. */
+        if (!tk->eof) tokenizer_read_input(tk);
+        /* If the file was already out of characters, or if we tried to read
+           some characters and it is still out of characters, return null. */
+        if (tk->eof) return '\0';
+    }
+
+    return tk->blob.data[tk->blob_chars_read];
 }
 
 struct token_definition {
@@ -51,19 +97,22 @@ struct token get_token(struct tokenizer *tk) {
         return tk->peek_token;
     }
 
-    while (tk->next < tk->end && IS_WHITESPACE(*tk->next)) {
-        if (tk->next + 1 < tk->end
-            && tk->next[0] == '\r' && tk->next[1] == '\n')
-        {
-            tk->next += 2;
+    while (true) {
+        char c = tokenizer_peek_char(tk);
+        if (!IS_WHITESPACE(c)) break;
+        tk->blob_chars_read += 1;
+
+        if (c == '\r') {
             tk->row += 1;
             tk->column = 0;
-        } else if (*tk->next == '\r' || *tk->next == '\n') {
-            tk->next += 1;
+
+            if (tokenizer_peek_char(tk) == '\n') {
+                tk->blob_chars_read += 1;
+            }
+        } else if (c == '\n') {
             tk->row += 1;
             tk->column = 0;
         } else {
-            tk->next += 1;
             tk->column += 1;
         }
     }
@@ -71,28 +120,39 @@ struct token get_token(struct tokenizer *tk) {
     struct token result;
     result.row = tk->row;
     result.column = tk->column;
-    result.it.data = tk->next;
-    result.it.length = 0;
 
-    if (tk->next >= tk->end) {
+    if (tk->blob_chars_read >= tk->blob.count && tk->eof) {
         result.id = TOKEN_EOF;
+        result.it.data = NULL;
         result.it.length = 0;
-    } else if (*tk->next < 32) {
+        return result;
+    }
+
+    struct char_buffer it = {0};
+    char c = tokenizer_peek_char(tk);
+    buffer_push(it, c);
+    tk->column += 1;
+    tk->blob_chars_read += 1;
+
+    if (c < 32) {
         fprintf(stderr, "Error at line %d, %d: Non-printable character "
-            "encountered. (Code: %d)\n", tk->row, tk->column, *tk->next);
+            "encountered. (Code: %d)\n", tk->row, tk->column, c);
         exit(EXIT_FAILURE);
-    } else if (!IS_PRINTABLE(*tk->next)) {
+    } else if (!IS_PRINTABLE(c)) {
         fprintf(stderr, "Error at line %d, %d: Non-ASCII character "
             "encountered.\n", tk->row, tk->column);
         exit(EXIT_FAILURE);
-    } else if (IS_ALPHA(*tk->next)) {
-        int length = 0;
-        while (tk->next < tk->end && IS_ALPHANUM(*tk->next)) {
-            tk->next += 1;
+    } else if (IS_ALPHA(c)) {
+        while (true) {
+            c = tokenizer_peek_char(tk);
+            if (!IS_ALPHANUM(c)) break;
+
+            buffer_push(it, c);
             tk->column += 1;
-            length += 1;
+            tk->blob_chars_read += 1;
         }
-        result.it.length = length;
+        result.it.data = it.data;
+        result.it.length = it.count;
 
         result.id = TOKEN_ALPHANUM; /* Default value. */
         for (int i = 0; i < ARRAY_LENGTH(keywords); i++) {
@@ -102,34 +162,50 @@ struct token get_token(struct tokenizer *tk) {
                 break;
             }
         }
-    } else if (IS_NUM(*tk->next)) {
-        int length = 0;
-        while (tk->next < tk->end
-            && (IS_ALPHANUM(*tk->next) || *tk->next == '.'))
-        {
-            tk->next += 1;
+    } else if (IS_NUM(c)) {
+        while (true) {
+            c = tokenizer_peek_char(tk);
+            if (!IS_ALPHANUM(c) && c != '.') break;
+
+            buffer_push(it, c);
             tk->column += 1;
-            length += 1;
+            tk->blob_chars_read += 1;
         }
-        result.it.length = length;
+        result.it.data = it.data;
+        result.it.length = it.count;
 
         result.id = TOKEN_NUMERIC;
     } else {
-        result.id = *tk->next; /* Default value. */
-        result.it.length = 1;
+        result.id = c; /* Default value. */
+        tk->blob_chars_read -= 1; /* Undo temporarily */
+        bool extended = false;
         for (int i = 0; i < ARRAY_LENGTH(compound_operators); i++) {
             /* TODO: calculate the operator lengths up-front somewhere */
             str op = from_cstr(compound_operators[i].cstr);
-            if (tk->next + op.length > tk->end) continue;
-            if (strncmp(tk->next, op.data, op.length) != 0) continue;
+            if (op.length > tk->blob.count - tk->blob_chars_read) {
+                if (extended) continue;
+
+                tokenizer_read_input(tk);
+                extended = true;
+
+                if (op.length > tk->blob.count - tk->blob_chars_read) {
+                    continue;
+                }
+            }
+
+            char *next = tk->blob.data + tk->blob_chars_read;
+            if (strncmp(next, op.data, op.length) != 0) continue;
 
             result.id = compound_operators[i].id;
-            result.it.length = op.length;
+            buffer_setcount(it, op.length);
+            memcpy(it.data, op.data, op.length);
             break;
         }
 
-        tk->next += result.it.length;
-        tk->column += result.it.length;
+        result.it.data = it.data;
+        result.it.length = it.count;
+        tk->column += result.it.length - 1;
+        tk->blob_chars_read += result.it.length;
     }
 
     return result;
