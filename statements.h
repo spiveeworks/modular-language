@@ -6,7 +6,7 @@
 #include "tokenizer.h"
 #include "expressions.h"
 
-void parse_assignment(
+void parse_statement(
     struct instruction_buffer *out,
     struct tokenizer *tokenizer,
     struct record_table *bindings
@@ -14,7 +14,19 @@ void parse_assignment(
     struct expr_parse_result lhs = parse_expression(tokenizer);
 
     struct token tk = get_token(tokenizer);
-    if (tk.id == TOKEN_DEFINE) {
+    if (tk.id == ';') {
+        struct type_buffer intermediates = {0};
+
+        compile_expression(
+            out,
+            bindings,
+            &intermediates,
+            &lhs.atoms
+        );
+
+        buffer_free(lhs.atoms);
+        buffer_free(intermediates);
+    } else if (tk.id == TOKEN_DEFINE) {
         if (lhs.has_ref_decl) {
             fprintf(stderr, "Error: \'ref\' is not yet supported.\n");
             exit(EXIT_FAILURE);
@@ -84,7 +96,7 @@ struct item parse_item(
     } else {
         struct instruction_buffer out = {0};
         put_token_back(tokenizer, tk);
-        parse_assignment(&out, tokenizer, bindings);
+        parse_statement(&out, tokenizer, bindings);
 
         result.type = ITEM_STATEMENT;
         result.statement_code = out;

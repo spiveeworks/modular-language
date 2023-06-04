@@ -198,7 +198,7 @@ void call_stack_push_exec_frame(
     frame->count = code->count;
     frame->current = 0;
 
-    frame->locals_start = stack->vars.global_count;
+    frame->locals_start = stack->vars.count;
     frame->locals_count = 0;
 }
 
@@ -273,14 +273,18 @@ void write_ref(
     vars->data[index].mem_mode = mem_mode;
 }
 
-void unbind_variable(
-    struct variable_stack *vars,
-    size_t index
-) {
+void unbind_variable(struct variable_stack *vars, size_t index) {
     if (vars->data[index].mem_mode == VARIABLE_REFCOUNT) {
         shared_buff_decrement(vars->data[index].value.shared_buff.ptr);
     }
     vars->data[index].mem_mode = VARIABLE_UNBOUND;
+}
+
+void unbind_temporaries(struct variable_stack *vars) {
+    while (vars->count > vars->global_count) {
+        unbind_variable(vars, vars->count - 1);
+        vars->count -= 1;
+    }
 }
 
 void continue_execution(struct call_stack *stack) {
@@ -517,6 +521,7 @@ void execute_top_level_code(
         exit(EXIT_FAILURE);
     }
 
+    unbind_temporaries(&stack->vars);
     call_stack_push_exec_frame(stack, statement_code);
 
     continue_execution(stack);

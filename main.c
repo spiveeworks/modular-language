@@ -101,6 +101,14 @@ void disassemble_instructions(struct instruction_buffer instructions) {
     }
 }
 
+void print_call_stack_value(struct variable_data *it) {
+    if (it->mem_mode == VARIABLE_REFCOUNT) {
+        print_array(it->value.shared_buff);
+    } else {
+        printf("%lld", (long long)it->value.val64);
+    }
+}
+
 struct statement_buffer {
     struct instruction_buffer *data;
     size_t count;
@@ -190,7 +198,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < statements.count; i++) {
             execute_top_level_code(&call_stack, &statements.data[i]);
 
-            /* TODO: Check the call stack size after each statement? */
+            /* TODO: Check vars.global_count after each statement? */
 
             /* Top level statements are fired once and then forgotten. */
             buffer_free(statements.data[i]);
@@ -211,18 +219,30 @@ int main(int argc, char **argv) {
             printf("\nState:\n");
         }
         for (int i = prev_global_count; i < call_stack.vars.global_count; i++) {
-            struct variable_data *it = &call_stack.vars.data[i];
-
             fputstr(bindings.data[i].name, stdout);
             printf(" = ");
-
-            if (it->mem_mode == VARIABLE_REFCOUNT) {
-                print_array(it->value.shared_buff);
-            } else {
-                printf("%lld", (long long)it->value.val64);
-            }
+            print_call_stack_value(&call_stack.vars.data[i]);
             printf("\n");
         }
+
+        if (repl) {
+            /* If the last statement in this line was a bare expression, print
+               its results. */
+            size_t start = call_stack.vars.global_count;
+            size_t end = call_stack.vars.count;
+            if (start < end) {
+                printf("result = ");
+                for (size_t i = start; i < end; i++) {
+                    if (i > start) printf(", ");
+
+                    struct variable_data *it = &call_stack.vars.data[i];
+
+                    print_call_stack_value(it);
+                }
+                printf("\n");
+            }
+        }
+        unbind_temporaries(&call_stack.vars);
 
         if (repl) printf("> ");
     }
