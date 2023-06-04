@@ -107,24 +107,40 @@ struct statement_buffer {
     size_t capacity;
 };
 
+bool debug = false;
+
 int main(int argc, char **argv) {
-    if (argc > 2) {
-        fprintf(stderr, "Error: Too many arguments.\n");
-        exit(EXIT_FAILURE);
+    char *input_path = NULL;
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-debug") == 0) {
+            if (debug) {
+                fprintf(stderr, "Warning: Got -debug option multiple times. "
+                    "Ignoring.\n");
+            }
+            debug = true;
+        } else {
+            if (input_path) {
+                fprintf(stderr, "Error: Got too many command line "
+                    "arguments.\n");
+                exit(EXIT_FAILURE);
+            }
+            input_path = argv[i];
+        }
     }
 
     FILE *input;
     bool repl;
-    if (argc == 1) {
-        input = stdin;
-        repl = true;
-    } else {
-        input = fopen(argv[1], "rb");
+    if (input_path) {
+        input = fopen(input_path, "rb");
         if (!input) {
-            fprintf(stderr, "Error: couldn't open file \"%s\"\n", argv[1]);
+            fprintf(stderr, "Error: couldn't open file \"%s\"\n", input_path);
             exit(EXIT_FAILURE);
         }
         repl = false;
+    } else {
+        input = stdin;
+        repl = true;
     }
 
     struct tokenizer tokenizer = start_tokenizer(input);
@@ -151,8 +167,10 @@ int main(int argc, char **argv) {
         if (item.type == ITEM_STATEMENT) {
             buffer_push(statements, item.statement_code);
 
-            printf("\nStatement parsed. Output:\n");
-            disassemble_instructions(item.statement_code);
+            if (debug) {
+                printf("\nStatement parsed. Output:\n");
+                disassemble_instructions(item.statement_code);
+            }
         } else if (item.type == ITEM_NULL) {
             break;
         } else {
@@ -165,7 +183,10 @@ int main(int argc, char **argv) {
         if (repl && !tokenizer_try_read_eol(&tokenizer)) continue;
 
         /* Finished parsing something. Time to execute it. */
-        printf("\nExecuting.\n");
+        /* Store global count to track how many are new. */
+        int prev_global_count = call_stack.vars.global_count;
+
+        if (debug) printf("\nExecuting.\n");
         for (int i = 0; i < statements.count; i++) {
             execute_top_level_code(&call_stack, &statements.data[i]);
 
@@ -186,8 +207,10 @@ int main(int argc, char **argv) {
             call_stack.vars.global_count = bindings.global_count;
         }
 
-        printf("\nState:\n");
-        for (int i = 0; i < call_stack.vars.global_count; i++) {
+        if (debug && prev_global_count < call_stack.vars.global_count) {
+            printf("\nState:\n");
+        }
+        for (int i = prev_global_count; i < call_stack.vars.global_count; i++) {
             struct variable_data *it = &call_stack.vars.data[i];
 
             fputstr(bindings.data[i].name, stdout);

@@ -5,6 +5,8 @@
 /* We really just need the items. We could move them to types.h, or items.h? */
 #include "statements.h"
 
+extern bool debug;
+
 /******************/
 /* Shared Buffers */
 /******************/
@@ -47,8 +49,10 @@ struct shared_buff shared_buff_alloc(struct type *elem_type, int count) {
     ptr->start_offset = 0;
     ptr->count = count;
     ptr->buffer_size = elem_size * count;
-    print_ref_count(ptr);
-    printf("count is %d\n", count);
+    if (debug) {
+        print_ref_count(ptr);
+        printf("count is %d\n", count);
+    }
 
     struct shared_buff result = {ptr, 0, count};
     return result;
@@ -60,7 +64,7 @@ void shared_buff_decrement(struct shared_buff_header *ptr) {
     struct type *elem_type = ptr->element_type;
 
     ptr->references -= 1;
-    print_ref_count(ptr);
+    if (debug) print_ref_count(ptr);
     if (ptr->references <= 0) {
         if (elem_type->connective == TYPE_ARRAY) {
             uint8 *buff_start = (uint8*)&ptr[1];
@@ -102,8 +106,10 @@ void copy_vals(struct type *element_type, void *dest, void *source, int count) {
         for (int i = 0; i < count; i++) {
             struct shared_buff_header *header = buffs[i].ptr;
             if (header) header->references += 1;
-            print_ref_count(header);
-            printf("count is %d\n", buffs[i].count);
+            if (debug) {
+                print_ref_count(header);
+                printf("count is %d\n", buffs[i].count);
+            }
         }
     } else if (element_type->connective != TYPE_INT) {
         fprintf(stderr, "Error: Copying aggregate data is not yet implemented.\n");
@@ -316,8 +322,10 @@ void continue_execution(struct call_stack *stack) {
                         exit(EXIT_FAILURE);
                     }
                     result.shared_buff.ptr->references += 1;
-                    print_ref_count(result.shared_buff.ptr);
-                    printf("count is %d\n", result.shared_buff.count);
+                    if (debug) {
+                        print_ref_count(result.shared_buff.ptr);
+                        printf("count is %d\n", result.shared_buff.count);
+                    }
                 }
             }
             break;
