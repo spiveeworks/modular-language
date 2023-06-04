@@ -115,6 +115,10 @@ struct partial_operation_buffer {
 struct op_stack {
     /* Represents something like  a || b && c == d +  */
     struct partial_operation_buffer lhs;
+    /* This is the number of open brackets are in the parse stack, minus one if
+       have_closing_token is trying to close a bracket. This lets us detect
+       complete expressions in REPL mode. */
+    int grouping_count;
 
     /* Represents the subsequent e, which either groups to the left or to the
        right. */
@@ -171,6 +175,7 @@ void read_next_ref(
         new.op.is_postfix = false;
         new.precedence = PRECEDENCE_GROUPING;
         buffer_push(stack->lhs, new);
+        stack->grouping_count += 1;
 
         if (tk.id != '(') {
             /* for '[' and '{' we actually want to store an atom in the
@@ -236,6 +241,8 @@ void read_next_op(
     else if (tk.id == ']') stack->opening_id = '[';
     else if (tk.id == '}') stack->opening_id = '{';
     else stack->opening_id = TOKEN_NULL;
+
+    if (stack->opening_id != TOKEN_NULL) stack->grouping_count -= 1;
 }
 
 bool resolve_closing_token(
@@ -354,7 +361,10 @@ bool resolve_closing_token(
     return false;
 }
 
-struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
+struct expr_parse_result parse_expression(
+    struct tokenizer *tokenizer,
+    bool end_on_eol
+) {
     bool has_ref_decl = false;
     struct rpn_buffer out = {0};
     int final_multi_value_count = 0;
@@ -410,7 +420,21 @@ struct expr_parse_result parse_expression(struct tokenizer *tokenizer) {
         } else if (!stack.have_next_ref) {
             read_next_ref(tokenizer, &stack, &out);
         } else if (!stack.have_next_op) {
-            read_next_op(tokenizer, &stack, &out);
+            if (end_on_eol && stack.grouping_count == 0
+                && tokenizer_peek_eol(tokenizer))
+            {
+                /* Pretend there was a semicolon. */
+                stack.have_closing_token = true;
+                stack.closing_token.id = ';';
+                stack.closing_token.it.data = malloc(1);
+                stack.closing_token.it.data[0] = ';';
+                stack.closing_token.it.length = 1;
+                stack.closing_token.row = tokenizer->row;
+                stack.closing_token.column = tokenizer->column;
+                stack.opening_id = TOKEN_NULL;
+            } else {
+                read_next_op(tokenizer, &stack, &out);
+            }
         } else {
             /* We have a ref and an operation, and they didn't cause anything
                to pop, so push instead, and try again. */

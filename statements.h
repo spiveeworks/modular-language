@@ -9,9 +9,10 @@
 void parse_statement(
     struct instruction_buffer *out,
     struct tokenizer *tokenizer,
-    struct record_table *bindings
+    struct record_table *bindings,
+    bool end_on_eol
 ) {
-    struct expr_parse_result lhs = parse_expression(tokenizer);
+    struct expr_parse_result lhs = parse_expression(tokenizer, end_on_eol);
 
     struct token tk = get_token(tokenizer);
     if (tk.id == ';') {
@@ -32,7 +33,7 @@ void parse_statement(
             exit(EXIT_FAILURE);
         }
 
-        struct expr_parse_result rhs = parse_expression(tokenizer);
+        struct expr_parse_result rhs = parse_expression(tokenizer, false);
 
         tk = get_token(tokenizer);
         if (tk.id != ';') {
@@ -86,7 +87,8 @@ struct item {
 
 struct item parse_item(
     struct tokenizer *tokenizer,
-    struct record_table *bindings
+    struct record_table *bindings,
+    bool repl
 ) {
     struct item result = {0};;
 
@@ -96,7 +98,7 @@ struct item parse_item(
     } else {
         struct instruction_buffer out = {0};
         put_token_back(tokenizer, tk);
-        parse_statement(&out, tokenizer, bindings);
+        parse_statement(&out, tokenizer, bindings, repl);
 
         result.type = ITEM_STATEMENT;
         result.statement_code = out;

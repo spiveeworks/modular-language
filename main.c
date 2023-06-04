@@ -170,7 +170,7 @@ int main(int argc, char **argv) {
             }
         }
 
-        struct item item = parse_item(&tokenizer, &bindings);
+        struct item item = parse_item(&tokenizer, &bindings, repl);
 
         if (item.type == ITEM_STATEMENT) {
             buffer_push(statements, item.statement_code);

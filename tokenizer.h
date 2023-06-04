@@ -90,7 +90,27 @@ struct token_definition compound_operators[] = {
     {"++", TOKEN_CONCAT},
 };
 
+bool tokenizer_peek_eol(struct tokenizer *tk) {
+    if (tk->has_peek_token) return false;
+
+    while (true) {
+        char c = tokenizer_peek_char(tk);
+        if (!IS_WHITESPACE(c)) return false;
+
+        if (c == '\r' || c == '\n') return true;
+
+        /* else */
+        /* Just any old whitespace. Skip ahead to see whether it was whitespace
+           at the end of a line. */
+        tk->blob_chars_read += 1;
+
+        tk->column += 1;
+    }
+}
+
 bool tokenizer_try_read_eol(struct tokenizer *tk) {
+    if (tk->has_peek_token) return false;
+
     while (true) {
         char c = tokenizer_peek_char(tk);
         if (!IS_WHITESPACE(c)) return false;
