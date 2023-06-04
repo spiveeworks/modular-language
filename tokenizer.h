@@ -11,7 +11,6 @@ struct char_buffer {
 
 struct tokenizer {
     FILE *input;
-    bool repl;
 
     int row;
     int column;
@@ -24,9 +23,9 @@ struct tokenizer {
     struct token peek_token;
 };
 
-struct tokenizer start_tokenizer(FILE *input, bool repl) {
+struct tokenizer start_tokenizer(FILE *input) {
     /* Make sure to start on line 1! */
-    return (struct tokenizer){input, repl, 1, 0};
+    return (struct tokenizer){input, 1, 0};
 }
 
 void tokenizer_read_input(struct tokenizer *tk) {
@@ -91,31 +90,56 @@ struct token_definition compound_operators[] = {
     {"++", TOKEN_CONCAT},
 };
 
-struct token get_token(struct tokenizer *tk) {
-    if (tk->has_peek_token) {
-        tk->has_peek_token = false;
-        return tk->peek_token;
-    }
-
+bool tokenizer_try_read_eol(struct tokenizer *tk) {
     while (true) {
         char c = tokenizer_peek_char(tk);
-        if (!IS_WHITESPACE(c)) break;
-        tk->blob_chars_read += 1;
+        if (!IS_WHITESPACE(c)) return false;
 
         if (c == '\r') {
+            tk->blob_chars_read += 1;
+
             tk->row += 1;
             tk->column = 0;
 
             if (tokenizer_peek_char(tk) == '\n') {
                 tk->blob_chars_read += 1;
             }
-        } else if (c == '\n') {
+
+            return true;
+        }
+        /* else */
+        if (c == '\n') {
+            tk->blob_chars_read += 1;
+
             tk->row += 1;
             tk->column = 0;
-        } else {
-            tk->column += 1;
+
+            return true;
         }
+        /* else */
+        /* Just any old whitespace. Skip ahead to see whether it was whitespace
+           at the end of a line. */
+        tk->blob_chars_read += 1;
+
+        tk->column += 1;
     }
+}
+
+void tokenizer_skip_whitespace(struct tokenizer *tk) {
+    while (tokenizer_try_read_eol(tk)) {
+        /* Do nothing. try_read_eol skips whitespace until it reads a newline,
+           all we want is check again. */
+    }
+}
+
+struct token get_token(struct tokenizer *tk) {
+    if (tk->has_peek_token) {
+        tk->has_peek_token = false;
+        return tk->peek_token;
+    }
+
+    /* Whitespace never indicates the start of a token, so skip it. */
+    tokenizer_skip_whitespace(tk);
 
     struct token result;
     result.row = tk->row;
