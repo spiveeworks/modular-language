@@ -222,6 +222,7 @@ void read_next_op(
         new.op.is_postfix = true;
         new.precedence = PRECEDENCE_GROUPING;
         buffer_push(stack->lhs, new);
+        stack->grouping_count += 1;
 
         stack->have_next_ref = false;
 
