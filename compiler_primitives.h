@@ -265,6 +265,30 @@ void compile_proc_call(
         instr.arg1.x = intermediates->count - arg_count - 1;
     }
 
+    struct type proc_type = get_type_info(bindings, intermediates, instr.arg1);
+    if (proc_type.connective != TYPE_PROCEDURE) {
+        fprintf(stderr, "Error at line %d, %d: Tried to apply \"",
+            proc->tk.row, proc->tk.column);
+        fputstr(proc->tk.it, stderr);
+        fprintf(stderr, "\" to arguments, but it is not a function or "
+            "procedure.\n");
+        exit(EXIT_FAILURE);
+    }
+    struct type_buffer inputs = proc_type.proc.inputs;
+    struct type_buffer outputs = proc_type.proc.outputs;
+
+    if (inputs.count != arg_count) {
+        fprintf(stderr, "Error at line %d, %d: Procedure \"",
+            proc->tk.row, proc->tk.column);
+        fputstr(proc->tk.it, stderr);
+        fprintf(stderr, "\" expected %d arguments, but %d were given.\n",
+            (int)inputs.count, (int)arg_count);
+        exit(EXIT_FAILURE);
+    }
+    if (inputs.count != 0) {
+        fprintf(stderr, "Warning: Procedure arguments are not type checked.\n");
+    }
+
     instr.arg2.type = REF_CONSTANT;
     instr.arg2.x = arg_count;
 
@@ -274,8 +298,12 @@ void compile_proc_call(
     intermediates->count -= arg_count;
     /* discard proc */
     if (!proc->push) intermediates->count -= 1;
+
     /* add result */
-    buffer_push(*intermediates, type_int64);
+    buffer_maybe_grow(*intermediates, outputs.count);
+    for (int i = 0; i < outputs.count; i++) {
+        buffer_push(*intermediates, outputs.data[i]);
+    }
 }
 
 void compile_return(

@@ -130,6 +130,7 @@ enum type_connective {
     TYPE_TUPLE,
     TYPE_RECORD,
     TYPE_ARRAY,
+    TYPE_PROCEDURE,
 };
 
 struct record_entry;
@@ -142,12 +143,26 @@ struct record_table {
     size_t global_count;
 };
 
+struct type;
+
+struct type_buffer {
+    struct type *data;
+    size_t count;
+    size_t capacity;
+};
+
+struct proc_signature {
+    struct type_buffer inputs;
+    struct type_buffer outputs;
+};
+
 struct type {
     enum type_connective connective;
     union {
         uint8 word_size; /* 0 => 8 bits, up to 3 => 64 bits */
         struct record_table fields;
         struct type *inner;
+        struct proc_signature proc;
     };
     int32 total_size;
 };
@@ -173,6 +188,17 @@ struct type type_array_of(struct type entry_type) {
     /* TODO: reorganise shared_buffer to be in a place that lets us sizeof it
        from here. */
     result.total_size = 16;
+
+    return result;
+}
+
+struct type type_proc(struct type_buffer inputs, struct type_buffer outputs) {
+    struct type result;
+    result.connective = TYPE_PROCEDURE;
+    result.proc.inputs = inputs;
+    result.proc.outputs = outputs;
+    /* TODO: Give all functions enclosed data? */
+    result.total_size = 8;
 
     return result;
 }
@@ -270,12 +296,6 @@ struct instruction {
 
 struct instruction_buffer {
     struct instruction *data;
-    size_t count;
-    size_t capacity;
-};
-
-struct type_buffer {
-    struct type *data;
     size_t count;
     size_t capacity;
 };

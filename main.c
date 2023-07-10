@@ -174,20 +174,17 @@ int main(int argc, char **argv) {
         struct item item = parse_item(&tokenizer, &bindings, repl);
 
         if (item.type == ITEM_STATEMENT) {
-            buffer_push(statements, item.statement_code);
+            buffer_push(statements, item.instructions);
 
             if (debug) {
                 printf("\nStatement parsed. Output:\n");
-                disassemble_instructions(item.statement_code);
+                disassemble_instructions(item.instructions);
             }
         } else if (item.type == ITEM_PROCEDURE) {
             struct procedure *p = buffer_addn(procedures, 1);
-            p->instructions = item.statement_code;
+            p->instructions = item.instructions;
 
-            struct record_entry *binding = buffer_addn(bindings, 1);
-            binding->name = item.name;
-            /* TODO: function type stuff ugh */
-            binding->type = type_int64;
+            buffer_push(bindings, item.proc_binding);
             bindings.global_count = bindings.count;
 
             struct variable_data *var = buffer_addn(call_stack.vars, 1);

@@ -105,7 +105,43 @@ void parse_statement(
 /* Procedures */
 /**************/
 
-str parse_procedure(
+struct type parse_type(struct tokenizer *tokenizer) {
+    struct token tk = get_token(tokenizer);
+
+    if (tk.id == '[') {
+        struct type inner = parse_type(tokenizer);
+        struct type result = type_array_of(inner);
+        tk = get_token(tokenizer);
+
+        if (tk.id != ']') {
+            fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
+                tk.row, tk.column);
+            fputstr(tk.it, stderr);
+            fprintf(stderr, "\" in parameter/output type.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        return result;
+    }
+    /* else */
+
+    if (tk.id != TOKEN_ALPHANUM) {
+        fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
+            tk.row, tk.column);
+        fputstr(tk.it, stderr);
+        fprintf(stderr, "\" in parameter/output type.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (!str_eq(tk.it, from_cstr("Int"))) {
+        fprintf(stderr, "Error at line %d, %d: Currently only Int and array "
+            "parameters are supported.\n", tk.row, tk.column);
+        exit(EXIT_FAILURE);
+    }
+    return type_int64;
+}
+
+struct record_entry parse_procedure(
     struct instruction_buffer *out,
     struct tokenizer *tokenizer,
     struct record_table *bindings
@@ -132,6 +168,8 @@ str parse_procedure(
         exit(EXIT_FAILURE);
     }
 
+    struct type_buffer input_types = {0};
+
     while (true) {
         tk = get_token(tokenizer);
         if (tk.id == ')') {
@@ -150,24 +188,13 @@ str parse_procedure(
             exit(EXIT_FAILURE);
         }
 
-        tk = get_token(tokenizer);
-        if (tk.id != TOKEN_ALPHANUM) {
-            fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
-                tk.row, tk.column);
-            fputstr(tk.it, stderr);
-            fprintf(stderr, "\" in parameter list.\n");
-            exit(EXIT_FAILURE);
-        }
+        struct type ty = parse_type(tokenizer);
 
-        if (!str_eq(tk.it, from_cstr("Int"))) {
-            fprintf(stderr, "Error at line %d, %d: Currently only Int parameters are "
-                "supported.\n", tk.row, tk.column);
-            exit(EXIT_FAILURE);
-        }
+        buffer_push(input_types, ty);
 
         struct record_entry *new = buffer_addn(*bindings, 1);
         new->name = name;
-        new->type = type_int64;
+        new->type = ty;
 
         tk = get_token(tokenizer);
         if (tk.id == ')') {
@@ -184,6 +211,18 @@ str parse_procedure(
     }
 
     tk = get_token(tokenizer);
+
+    struct type_buffer output_types = {0};
+    bool result_specified = false;
+
+    if (tk.id == TOKEN_ARROW) {
+        struct type ty = parse_type(tokenizer);
+        result_specified = true;
+        buffer_push(output_types, ty);
+
+        tk = get_token(tokenizer);
+    }
+
     if (tk.id == TOKEN_DEFINE) {
         struct expr_parse_result lhs = parse_expression(tokenizer, false);
 
@@ -208,7 +247,9 @@ str parse_procedure(
         buffer_free(lhs.atoms);
 
         compile_return(out, &intermediates);
-        buffer_free(intermediates);
+        /* TODO: Unify these outputs */
+        if (!result_specified) output_types = intermediates;
+        else buffer_free(intermediates);
     } else if (tk.id == '{') {
         while (true) {
             struct token tk = get_token(tokenizer);
@@ -228,7 +269,10 @@ str parse_procedure(
 
     bindings->count = prev_binding_count;
 
-    return proc_name;
+    struct record_entry result;
+    result.name = proc_name;
+    result.type = type_proc(input_types, output_types);
+    return result;
 }
 
 /*******************/
@@ -243,8 +287,8 @@ enum item_type {
 
 struct item {
     enum item_type type;
-    struct instruction_buffer statement_code;
-    str name;
+    struct instruction_buffer instructions;
+    struct record_entry proc_binding;
 };
 
 struct item parse_item(
@@ -259,16 +303,16 @@ struct item parse_item(
         result.type = ITEM_NULL; /* Not technically necessary. */
     } else if (tk.id == TOKEN_FUNC || tk.id == TOKEN_PROC) {
         struct instruction_buffer out = {0};
-        result.name = parse_procedure(&out, tokenizer, bindings);
+        result.proc_binding = parse_procedure(&out, tokenizer, bindings);
         result.type = ITEM_PROCEDURE;
-        result.statement_code = out;
+        result.instructions = out;
     } else {
         struct instruction_buffer out = {0};
         put_token_back(tokenizer, tk);
         parse_statement(&out, tokenizer, bindings, true, repl);
 
         result.type = ITEM_STATEMENT;
-        result.statement_code = out;
+        result.instructions = out;
     }
 
     return result;
