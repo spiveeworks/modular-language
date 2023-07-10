@@ -156,6 +156,7 @@ int main(int argc, char **argv) {
         printf("Unmatched Perspicacity Prompt\n");
         printf("> ");
     }
+    struct procedure_buffer procedures = {0};
     struct record_table bindings = {0};
     struct call_stack call_stack = {0};
 
@@ -180,7 +181,19 @@ int main(int argc, char **argv) {
                 disassemble_instructions(item.statement_code);
             }
         } else if (item.type == ITEM_PROCEDURE) {
-            printf("Procedure discarded.\n");
+            struct procedure *p = buffer_addn(procedures, 1);
+            p->instructions = item.statement_code;
+
+            struct record_entry *binding = buffer_addn(bindings, 1);
+            binding->name = item.name;
+            /* TODO: function type stuff ugh */
+            binding->type = type_int64;
+            bindings.global_count = bindings.count;
+
+            struct variable_data *var = buffer_addn(call_stack.vars, 1);
+            var->mem_mode = VARIABLE_DIRECT_VALUE;
+            var->value.val64 = procedures.count - 1;
+            call_stack.vars.global_count = bindings.global_count;
         } else if (item.type == ITEM_NULL) {
             break;
         } else {
@@ -198,7 +211,7 @@ int main(int argc, char **argv) {
 
         if (debug) printf("\nExecuting.\n");
         for (int i = 0; i < statements.count; i++) {
-            execute_top_level_code(&call_stack, &statements.data[i]);
+            execute_top_level_code(procedures, &call_stack, &statements.data[i]);
 
             /* TODO: Check vars.global_count after each statement? */
 

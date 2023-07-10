@@ -224,6 +224,9 @@ enum operation {
     OP_EDIV,
     OP_EMOD,
 
+    OP_CALL,
+    OP_RET,
+
     OP_ARRAY_ALLOC,
     OP_ARRAY_STORE,
     OP_ARRAY_INDEX,

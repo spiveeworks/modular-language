@@ -250,7 +250,26 @@ void compile_proc_call(
     struct rpn_ref *proc,
     int arg_count
 ) {
-    printf("Function calls not yet implemented. Discarding args.\n");
+    struct instruction instr = {0};
+    instr.op = OP_CALL;
+    instr.flags = 0;
+    instr.output.type = REF_NULL;
+
+    instr.arg1.type = REF_CONSTANT;
+    instr.arg1.x = intermediates->count;
+
+    if (proc->push) {
+        instr.arg1 = compile_value_token(bindings, &proc->tk);
+    } else {
+        instr.arg1.type = REF_TEMPORARY;
+        instr.arg1.x = intermediates->count - arg_count - 1;
+    }
+
+    instr.arg2.type = REF_CONSTANT;
+    instr.arg2.x = arg_count;
+
+    buffer_push(*out, instr);
+
     /* discard args */
     intermediates->count -= arg_count;
     /* discard proc */
@@ -259,8 +278,18 @@ void compile_proc_call(
     buffer_push(*intermediates, type_int64);
 }
 
-void compile_return(struct type_buffer *intermediates) {
-    printf("Return statements not yet implemented.\n");
+void compile_return(
+    struct instruction_buffer *out,
+    struct type_buffer *intermediates
+) {
+    struct instruction instr = {0};
+    instr.op = OP_RET;
+    instr.flags = 0;
+    instr.output.type = REF_NULL;
+    instr.arg1.type = REF_CONSTANT;
+    instr.arg1.x = intermediates->count;
+    instr.arg2.type = REF_NULL;
+    buffer_push(*out, instr);
 }
 
 #endif

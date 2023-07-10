@@ -36,7 +36,7 @@ void parse_statement(
 
         buffer_free(lhs.atoms);
 
-        compile_return(&intermediates);
+        compile_return(out, &intermediates);
         buffer_free(intermediates);
     } else {
         put_token_back(tokenizer, tk);
@@ -105,7 +105,7 @@ void parse_statement(
 /* Procedures */
 /**************/
 
-void parse_procedure(
+str parse_procedure(
     struct instruction_buffer *out,
     struct tokenizer *tokenizer,
     struct record_table *bindings
@@ -119,7 +119,7 @@ void parse_procedure(
         exit(EXIT_FAILURE);
     }
 
-    /* Discard procedure name for now. */
+    str proc_name = tk.it;
 
     int prev_binding_count = bindings->count;
 
@@ -207,7 +207,7 @@ void parse_procedure(
 
         buffer_free(lhs.atoms);
 
-        compile_return(&intermediates);
+        compile_return(out, &intermediates);
         buffer_free(intermediates);
     } else if (tk.id == '{') {
         while (true) {
@@ -227,6 +227,8 @@ void parse_procedure(
     }
 
     bindings->count = prev_binding_count;
+
+    return proc_name;
 }
 
 /*******************/
@@ -242,6 +244,7 @@ enum item_type {
 struct item {
     enum item_type type;
     struct instruction_buffer statement_code;
+    str name;
 };
 
 struct item parse_item(
@@ -256,8 +259,7 @@ struct item parse_item(
         result.type = ITEM_NULL; /* Not technically necessary. */
     } else if (tk.id == TOKEN_FUNC || tk.id == TOKEN_PROC) {
         struct instruction_buffer out = {0};
-        parse_procedure(&out, tokenizer, bindings);
-
+        result.name = parse_procedure(&out, tokenizer, bindings);
         result.type = ITEM_PROCEDURE;
         result.statement_code = out;
     } else {

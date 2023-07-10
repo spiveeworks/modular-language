@@ -7,6 +7,20 @@
 
 extern bool debug;
 
+/*************************/
+/* Procedure Definitions */
+/*************************/
+
+struct procedure {
+    struct instruction_buffer instructions;
+};
+
+struct procedure_buffer {
+    struct procedure *data;
+    size_t count;
+    size_t capacity;
+};
+
 /******************/
 /* Shared Buffers */
 /******************/
@@ -287,11 +301,14 @@ void unbind_temporaries(struct variable_stack *vars) {
     }
 }
 
-void continue_execution(struct call_stack *stack) {
+void continue_execution(
+    struct procedure_buffer procedures,
+    struct call_stack *stack
+) {
     while (stack->exec.count > 0) {
         struct execution_frame *frame = buffer_top(stack->exec);
         if (frame->current < 0 || frame->current >= frame->count) {
-            buffer_change_count(stack->exec, -1);
+            stack->exec.count -= 1;
             continue;
         }
 
@@ -411,6 +428,61 @@ void continue_execution(struct call_stack *stack) {
             if (arg1 >= 0) result.val64 = arg1 % arg2;
             else result.val64 = arg2 - 1 - (-arg1 - 1) % arg2;
             break;
+        case OP_CALL:
+        {
+            if (next->arg1.type == REF_TEMPORARY) {
+                /* unbind it early, and shift all the arguments back one */
+                /* This little expense should usually be unnecessary, and saves
+                   a big headache of tombstones inside multivalues that we do
+                   nooot want to deal with. */
+                int index = frame->locals_start + frame->locals_count
+                    + next->arg1.x;
+                unbind_variable(&stack->vars, index);
+
+                for (int i = index + 1; i < stack->vars.count; i++) {
+                    stack->vars.data[i - 1] = stack->vars.data[i];
+                }
+                stack->vars.count -= 1;
+            }
+
+            struct execution_frame new;
+
+            new.start = procedures.data[arg1].instructions.data;
+            new.count = procedures.data[arg1].instructions.count;
+            new.current = 0;
+            new.locals_start = stack->vars.count - arg2;
+            new.locals_count = arg2;
+
+            buffer_push(stack->exec, new);
+
+            break;
+        }
+        case OP_RET:
+        {
+            /* Unbind all variables that aren't being returned. */
+            int source_offset = stack->vars.count - arg1;
+            int dest_offset = frame->locals_start;
+            for (int i = dest_offset; i < source_offset; i++) {
+                unbind_variable(&stack->vars, i);
+            }
+            /* Move results up the stack, to where the inputs were. */
+            for (int i = 0; i < arg1; i++) {
+                stack->vars.data[dest_offset + i] =
+                    stack->vars.data[source_offset + i];
+            }
+            /* Unbind the original copies of the return values. */
+            int unbind_start = source_offset;
+            if (dest_offset + arg1 > unbind_start) {
+                unbind_start = dest_offset + arg1;
+            }
+            for (int i = unbind_start; i < stack->vars.count; i++) {
+                stack->vars.data[i].mem_mode = VARIABLE_UNBOUND;
+            }
+
+            stack->exec.count -= 1;
+
+            break;
+        }
         case OP_ARRAY_ALLOC:
             result.shared_buff = shared_buff_alloc(arg1_full.pointer, arg2);
             result_mode = VARIABLE_REFCOUNT;
@@ -478,7 +550,7 @@ void continue_execution(struct call_stack *stack) {
             exit(EXIT_FAILURE);
         }
 
-        if (next->arg1.type == REF_TEMPORARY) {
+        if (next->arg1.type == REF_TEMPORARY && next->op != OP_CALL) {
             unbind_variable(
                 &stack->vars,
                 frame->locals_start + frame->locals_count + next->arg1.x
@@ -507,11 +579,16 @@ void continue_execution(struct call_stack *stack) {
             stack->vars.count -= 1;
         }
 
+        /* We may have just returned, in which case this change is allowed, but
+           discarded. We also may have just called into something, in which
+           case this change is allowed, and necessary, in order to return to
+           one past the call site. */
         frame->current += 1;
     }
 }
 
 void execute_top_level_code(
+    struct procedure_buffer procedures,
     struct call_stack *stack,
     struct instruction_buffer *statement_code
 ) {
@@ -524,7 +601,7 @@ void execute_top_level_code(
     unbind_temporaries(&stack->vars);
     call_stack_push_exec_frame(stack, statement_code);
 
-    continue_execution(stack);
+    continue_execution(procedures, stack);
 }
 
 #endif
