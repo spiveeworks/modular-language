@@ -179,6 +179,8 @@ int main(int argc, char **argv) {
                 printf("\nStatement parsed. Output:\n");
                 disassemble_instructions(item.statement_code);
             }
+        } else if (item.type == ITEM_PROCEDURE) {
+            printf("Procedure discarded.\n");
         } else if (item.type == ITEM_NULL) {
             break;
         } else {

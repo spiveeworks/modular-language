@@ -69,7 +69,9 @@ struct token_definition {
 };
 
 struct token_definition keywords[] = {
-    {"func", TOKEN_FUNC},
+    {"function", TOKEN_FUNC},
+    {"procedure", TOKEN_PROC},
+    {"return", TOKEN_RETURN},
     {"var", TOKEN_VAR},
     {"ref", TOKEN_REF},
     {"not", TOKEN_LOGIC_NOT},

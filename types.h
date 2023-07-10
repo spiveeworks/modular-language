@@ -101,6 +101,8 @@ enum token_id {
     TOKEN_CONCAT,
 
     TOKEN_FUNC,
+    TOKEN_PROC,
+    TOKEN_RETURN,
     TOKEN_VAR,
     TOKEN_REF,
     TOKEN_LOGIC_NOT,

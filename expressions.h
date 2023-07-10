@@ -233,6 +233,24 @@ void read_next_op(
 
         /* Still have no op. Proceed to ref position. */
         return;
+    } else if (tk.id == '(') {
+        struct partial_operation new;
+        new.arg = stack->next_ref;
+        new.op.type = RPN_GROUPING;
+        new.op.tk = tk;
+        new.op.multi_value_count = 0;
+        new.op.is_postfix = true;
+        new.precedence = PRECEDENCE_GROUPING;
+        buffer_push(stack->lhs, new);
+        stack->grouping_count += 1;
+
+        stack->have_next_ref = false;
+
+        /* Push the opening bracket, to help with parsing. */
+        buffer_push(*out, new.op);
+
+        /* Still have no op. Proceed to ref position. */
+        return;
     }
 
     /* either a closing delimiter, or the end of the expression */
@@ -267,7 +285,7 @@ bool resolve_closing_token(
             }
             top->op.multi_value_count += 1;
 
-            if (top->op.tk.id == '(') {
+            if (top->op.tk.id == '(' && !top->op.is_postfix) {
                 fprintf(stderr, "Error at line %d, %d: There was a "
                         "comma inside grouping parentheses.\n",
                         top->op.tk.row, top->op.tk.column);
@@ -313,7 +331,7 @@ bool resolve_closing_token(
                 stack->closing_token.column, top->op.tk.id,
                 stack->closing_token.id);
         exit(EXIT_FAILURE);
-    } else if (stack->closing_token.id == ')') {
+    } else if (stack->closing_token.id == ')' && !top->op.is_postfix) {
         /* Resolve the brackets. */
         stack->lhs.count -= 1;
         stack->have_closing_token = false;
@@ -461,6 +479,7 @@ struct expr_parse_result parse_expression(
    about emplacement, even thought emplacement was the first case I had to make
    this stack to handle. Or... maybe it should just be emplacement? */
 enum emplace_type {
+    EMPLACE_CALL,
     EMPLACE_ARRAY,
     EMPLACE_INDEX,
 };
@@ -569,8 +588,22 @@ void compile_expression(
             enum operation_flags flags = 0;
 
             struct ref ref = compile_value_token(bindings, &in->data[i].tk);
-            if (ref.type == REF_GLOBAL) {
-                struct type *binding_type = &bindings->data[ref.x].type;
+            if (ref.type == REF_CONSTANT) {
+                buffer_push(*intermediates, type_int64);
+                flags = OP_64BIT;
+            } else {
+                int index;
+                if (ref.type == REF_GLOBAL) {
+                    index = ref.x;
+                } else if (ref.type == REF_LOCAL) {
+                    index = bindings->global_count + ref.x;
+                } else {
+                    fprintf(stderr, "Error: Got unknown ref type during mov "
+                        "compilation?\n");
+                    exit(EXIT_FAILURE);
+                }
+                struct type *binding_type = &bindings->data[index].type;
+
                 buffer_push(*intermediates, *binding_type);
                 if (binding_type->connective == TYPE_INT) {
                     if (binding_type->word_size != 3) {
@@ -583,13 +616,6 @@ void compile_expression(
                 } else if (binding_type->connective == TYPE_ARRAY) {
                     flags = OP_SHARED_BUFF;
                 }
-            } else if (ref.type == REF_CONSTANT) {
-                buffer_push(*intermediates, type_int64);
-                flags = OP_64BIT;
-            } else {
-                fprintf(stderr, "Error: Got unknown ref type during mov "
-                    "compilation?\n");
-                exit(EXIT_FAILURE);
             }
 
             struct instruction instr;
@@ -604,6 +630,16 @@ void compile_expression(
             fprintf(stderr, "Error: Got unknown atom type in RPN "
                 "compilation?\n");
             exit(EXIT_FAILURE);
+        } else if (in->data[i].tk.id == '(') {
+            struct emplace_info *next_emplace = buffer_addn(emplace_stack, 1);
+
+            if (in->data[i].is_postfix) {
+                next_emplace->alloc_instruction_index = -1;
+                next_emplace->emplace_type = EMPLACE_CALL;
+            }
+
+            next_emplace->multi_value_count = 0;
+            next_emplace->size = 0;
         } else if (in->data[i].tk.id == '[') {
             struct emplace_info *next_emplace = buffer_addn(emplace_stack, 1);
 
@@ -668,7 +704,7 @@ void compile_expression(
                 instr.arg2.x = intermediates->count - 1;
                 buffer_push(*out, instr);
                 intermediates->count -= 1;
-            } else if (em->emplace_type == EMPLACE_INDEX) {
+            } else if (em->emplace_type == EMPLACE_CALL || em->emplace_type == EMPLACE_INDEX) {
                 /* Do nothing, just leave the value on the stack, and continue
                    to count the multi-values. */
             } else {
@@ -679,6 +715,50 @@ void compile_expression(
                 exit(EXIT_FAILURE);
             }
             em->multi_value_count += 1;
+        } else if (in->data[i].tk.id == ')') {
+            if (emplace_stack.count <= 0) {
+                fprintf(stderr, "Error: Tried to compile unmatched close "
+                    "paren?\n");
+                exit(EXIT_FAILURE);
+            }
+            struct emplace_info em = buffer_pop(emplace_stack);
+            if (em.emplace_type != EMPLACE_CALL) {
+                fprintf(stderr, "Error: Tried to compile close paren marker "
+                    "for something other than a function/procedure call?\n");
+                exit(EXIT_FAILURE);
+            }
+
+            struct rpn_ref proc;
+            if (in->data[i + 1].type == RPN_VALUE) {
+                proc.push = true;
+                proc.tk = in->data[i + 1].tk;
+                j = 2;
+                if (in->data[i + j].type != RPN_BINARY_REVERSE
+                    || in->data[i + j].tk.id != '(')
+                {
+                    fprintf(stderr, "Error: Got postfix parentheses in RPN "
+                        "that weren't followed by function application?\n");
+                    exit(EXIT_FAILURE);
+                }
+            } else {
+                proc.push = false;
+                j = 1;
+                if (in->data[i + j].type != RPN_BINARY
+                    || in->data[i + j].tk.id != '(')
+                {
+                    fprintf(stderr, "Error: Got postfix parentheses in RPN "
+                        "that weren't followed by function application?\n");
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+            compile_proc_call(
+                out,
+                bindings,
+                intermediates,
+                &proc,
+                em.multi_value_count
+            );
         } else if (in->data[i].tk.id == ']') {
             if (emplace_stack.count <= 0) {
                 fprintf(stderr, "Error: Tried to compile unmatched close "
@@ -733,7 +813,8 @@ void assert_match_pattern(
     struct instruction_buffer *out,
     struct record_table *bindings,
     struct rpn_buffer *pattern,
-    struct type_buffer *values
+    struct type_buffer *values,
+    bool global
 ) {
     /* TODO: do I want to bind these forwards? Or backwards? */
     while (pattern->count > 0) {
@@ -769,9 +850,12 @@ void assert_match_pattern(
         new->name = name->tk.it;
         struct type val_type = buffer_pop(*values);
         new->type = val_type;
-        /* TODO: make this local if we are in a block or a function. */
-        struct ref new_var = {REF_GLOBAL, bindings->count - 1};
-        bindings->global_count = bindings->count;
+
+        struct ref new_var = {REF_LOCAL, bindings->count - 1};
+        if (global) {
+            new_var.type = REF_GLOBAL;
+            bindings->global_count = bindings->count;
+        }
 
         /* TODO: Make a procedure for these mov operations. */
         struct instruction instr;

@@ -243,4 +243,24 @@ void compile_operation(
     buffer_push(*intermediates, result_type);
 }
 
+void compile_proc_call(
+    struct instruction_buffer *out,
+    struct record_table *bindings,
+    struct type_buffer *intermediates,
+    struct rpn_ref *proc,
+    int arg_count
+) {
+    printf("Function calls not yet implemented. Discarding args.\n");
+    /* discard args */
+    intermediates->count -= arg_count;
+    /* discard proc */
+    if (!proc->push) intermediates->count -= 1;
+    /* add result */
+    buffer_push(*intermediates, type_int64);
+}
+
+void compile_return(struct type_buffer *intermediates) {
+    printf("Return statements not yet implemented.\n");
+}
+
 #endif
