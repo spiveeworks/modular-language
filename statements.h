@@ -11,10 +11,18 @@ void parse_statement(
     struct tokenizer *tokenizer,
     struct record_table *bindings,
     bool global,
-    bool end_on_eol
+    bool end_on_eol,
+    struct type_buffer *return_signature,
+    str proc_name
 ) {
     struct token tk = get_token(tokenizer);
     if (tk.id == TOKEN_RETURN) {
+        if (!return_signature) {
+            fprintf(stderr, "Error at line %d, %d: Tried to return from the "
+                "top level of a file.\n", tk.row, tk.column);
+            exit(EXIT_FAILURE);
+        }
+
         struct type_buffer intermediates = {0};
         struct expr_parse_result lhs = parse_expression(tokenizer, end_on_eol);
 
@@ -36,7 +44,10 @@ void parse_statement(
 
         buffer_free(lhs.atoms);
 
+        type_check_return(return_signature, &intermediates, proc_name);
+
         compile_return(out, &intermediates);
+
         buffer_free(intermediates);
     } else {
         put_token_back(tokenizer, tk);
@@ -248,8 +259,11 @@ struct record_entry parse_procedure(
 
         compile_return(out, &intermediates);
         /* TODO: Unify these outputs */
-        if (!result_specified) output_types = intermediates;
-        else buffer_free(intermediates);
+        if (!result_specified) {
+            output_types = intermediates;
+        } else {
+            type_check_return(&output_types, &intermediates, proc_name);
+        }
     } else if (tk.id == '{') {
         while (true) {
             struct token tk = get_token(tokenizer);
@@ -257,7 +271,7 @@ struct record_entry parse_procedure(
             /* else */
 
             put_token_back(tokenizer, tk);
-            parse_statement(out, tokenizer, bindings, false, false);
+            parse_statement(out, tokenizer, bindings, false, false, &output_types, proc_name);
         }
     } else {
         fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
@@ -309,7 +323,7 @@ struct item parse_item(
     } else {
         struct instruction_buffer out = {0};
         put_token_back(tokenizer, tk);
-        parse_statement(&out, tokenizer, bindings, true, repl);
+        parse_statement(&out, tokenizer, bindings, true, repl, NULL, (str){NULL, 0});
 
         result.type = ITEM_STATEMENT;
         result.instructions = out;

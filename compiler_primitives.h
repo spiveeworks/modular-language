@@ -203,9 +203,12 @@ void compile_operation(
                 "arrays.\n");
             exit(EXIT_FAILURE);
         }
-        /* TODO: check the array types agree. */
-        fprintf(stderr, "Warning: Currently array concat is not type "
-            "checked.\n");
+
+        if (!type_eq(arg1_type.inner, arg2_type.inner)) {
+            fprintf(stderr, "Error: Tried to apply ++ operator to arrays with "
+                "different types.\n", operation.row, operation.column);
+            exit(EXIT_FAILURE);
+        }
 
         result_type = arg1_type;
     } else {
@@ -285,8 +288,24 @@ void compile_proc_call(
             (int)inputs.count, (int)arg_count);
         exit(EXIT_FAILURE);
     }
-    if (inputs.count != 0) {
-        fprintf(stderr, "Warning: Procedure arguments are not type checked.\n");
+
+    struct type *actual_types =
+        &intermediates->data[intermediates->count - arg_count];
+
+    for (int i = 0; i < inputs.count; i++) {
+        if (!type_eq(&inputs.data[i], &actual_types[i])) {
+            if (proc->push) {
+                fprintf(stderr, "Error at line %d, %d: Argument %d of "
+                    "function call had the wrong type.\n",
+                    proc->tk.row, proc->tk.column, i + 1);
+                exit(EXIT_FAILURE);
+            } else {
+                /* TODO: get line numbers to here somehow */
+                fprintf(stderr, "Error: Argument %d of function call had the "
+                    "wrong type.\n", i + 1);
+                exit(EXIT_FAILURE);
+            }
+        }
     }
 
     instr.arg2.type = REF_CONSTANT;
@@ -318,6 +337,30 @@ void compile_return(
     instr.arg1.x = intermediates->count;
     instr.arg2.type = REF_NULL;
     buffer_push(*out, instr);
+}
+
+void type_check_return(
+    struct type_buffer *expected,
+    struct type_buffer *actual,
+    str proc_name
+) {
+    if (expected->count != actual->count) {
+        fprintf(stderr, "Error: Function \"");
+        fputstr(proc_name, stderr);
+        fprintf(stderr, "\" should return %d values, but %d were "
+            "given.\n", (int)expected->count,
+            (int)actual->count);
+        exit(EXIT_FAILURE);
+    }
+    for (int i = 0; i < actual->count; i++) {
+        if (!type_eq(&actual->data[i], &expected->data[i])) {
+            fprintf(stderr, "Error: Return value %d of function \"",
+                i + 1);
+            fputstr(proc_name, stderr);
+            fprintf(stderr, "\" had the wrong type.\n");
+            exit(EXIT_FAILURE);
+        }
+    }
 }
 
 #endif

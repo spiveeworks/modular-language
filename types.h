@@ -222,6 +222,55 @@ int lookup_name(struct record_table *table, str name) {
     return -1;
 }
 
+/*****************/
+/* Type Checking */
+/*****************/
+
+bool type_eq(struct type *a, struct type *b) {
+    if (a->connective != b->connective) {
+        return false;
+    }
+
+    switch (a->connective) {
+    case TYPE_INT:
+        return a->word_size == b->word_size;
+    case TYPE_UINT:
+        return a->word_size == b->word_size;
+    case TYPE_WORD:
+        return a->word_size == b->word_size;
+    case TYPE_FLOAT:
+        return a->word_size == b->word_size;
+    case TYPE_TUPLE:
+        fprintf(stderr, "Warning: Tuple type checking is not yet "
+            "implemented.\n");
+        return true;
+    case TYPE_RECORD:
+        fprintf(stderr, "Warning: Record type checking is not yet "
+            "implemented.\n");
+        return true;
+    case TYPE_ARRAY:
+        return type_eq(a->inner, b->inner);
+    case TYPE_PROCEDURE:
+        if (a->proc.inputs.count != b->proc.inputs.count) return false;
+        if (a->proc.outputs.count != b->proc.outputs.count) return false;
+        for (int i = 0; i < a->proc.inputs.count; i++) {
+            if (!type_eq(&a->proc.inputs.data[i], &b->proc.inputs.data[i])) {
+                return false;
+            }
+        }
+        for (int i = 0; i < a->proc.outputs.count; i++) {
+            if (!type_eq(&a->proc.outputs.data[i], &b->proc.outputs.data[i])) {
+                return false;
+            }
+        }
+        return true;
+    default:
+        fprintf(stderr, "Warning: Cannot type check unknown type connective "
+            "%d.\n", a->connective);
+        return true;
+    }
+}
+
 /****************/
 /* Instructions */
 /****************/
