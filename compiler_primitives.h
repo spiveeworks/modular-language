@@ -177,8 +177,7 @@ void compile_operation(
     struct instruction_buffer *out,
     struct record_table *bindings,
     struct intermediate_buffer *intermediates,
-    struct token operation,
-    bool reverse
+    struct token operation
 ) {
     struct operator_info *op = NULL;
     for (int i = 0; i < ARRAY_LENGTH(binary_ops); i++) {
@@ -198,19 +197,8 @@ void compile_operation(
         exit(EXIT_FAILURE);
     }
 
-    struct intermediate val1;
-    struct intermediate val2;
-    if (reverse) {
-        /* Popping off the stack reverses the order anyway, so pop arg1, then
-           pop arg2. */
-        val1 = pop_intermediate(intermediates);
-        val2 = pop_intermediate(intermediates);
-    } else {
-        /* Popping off the stack reverses the order, but we don't want to
-           reverse the order, so pop arg2, then pop arg1. */
-        val2 = pop_intermediate(intermediates);
-        val1 = pop_intermediate(intermediates);
-    }
+    struct intermediate val2 = pop_intermediate(intermediates);
+    struct intermediate val1 = pop_intermediate(intermediates);
 
     struct instruction result;
     result.op = op->opcode;
@@ -288,7 +276,6 @@ void compile_proc_call(
     struct instruction_buffer *out,
     struct record_table *bindings,
     struct intermediate_buffer *intermediates,
-    struct rpn_ref *proc,
     int arg_count
 ) {
     struct instruction instr = {0};
@@ -296,35 +283,25 @@ void compile_proc_call(
     instr.flags = 0;
     instr.output.type = REF_NULL;
 
-    struct intermediate proc_val;
-    if (proc->push) {
-        compile_value_token(bindings, intermediates, &proc->tk);
-        /* Immediately pop it back off, hehe */
-        proc_val = buffer_pop(*intermediates);
-    } else {
-        proc_val = intermediates->data[intermediates->count - arg_count - 1];
-    }
+    size_t proc_index = intermediates->count - arg_count - 1;
+    struct intermediate proc_val = intermediates->data[proc_index];
     /* This is supposed to be a valid procedure, we will see if it actually has
        the right type, though. */
     instr.arg1 = proc_val.ref;
 
     if (proc_val.type.connective != TYPE_PROCEDURE) {
-        fprintf(stderr, "Error at line %d, %d: Tried to apply \"",
-            proc->tk.row, proc->tk.column);
-        fputstr(proc->tk.it, stderr);
-        fprintf(stderr, "\" to arguments, but it is not a function or "
-            "procedure.\n");
+        /* TODO: Get a row/column here somehow */
+        fprintf(stderr, "Error: Tried to call something that "
+            "wasn't a function or procedure.\n");
         exit(EXIT_FAILURE);
     }
     struct type_buffer inputs = proc_val.type.proc.inputs;
     struct type_buffer outputs = proc_val.type.proc.outputs;
 
     if (inputs.count != arg_count) {
-        fprintf(stderr, "Error at line %d, %d: Procedure \"",
-            proc->tk.row, proc->tk.column);
-        fputstr(proc->tk.it, stderr);
-        fprintf(stderr, "\" expected %d arguments, but %d were given.\n",
-            (int)inputs.count, (int)arg_count);
+        /* TODO: Get a row/column here somehow */
+        fprintf(stderr, "Error: Procedure expected %d arguments, but %d were "
+            "given.\n", (int)inputs.count, (int)arg_count);
         exit(EXIT_FAILURE);
     }
 
@@ -333,17 +310,10 @@ void compile_proc_call(
 
     for (int i = 0; i < inputs.count; i++) {
         if (!type_eq(&inputs.data[i], &actual_types[i].type)) {
-            if (proc->push) {
-                fprintf(stderr, "Error at line %d, %d: Argument %d of "
-                    "function call had the wrong type.\n",
-                    proc->tk.row, proc->tk.column, i + 1);
-                exit(EXIT_FAILURE);
-            } else {
-                /* TODO: get line numbers to here somehow */
-                fprintf(stderr, "Error: Argument %d of function call had the "
-                    "wrong type.\n", i + 1);
-                exit(EXIT_FAILURE);
-            }
+            /* TODO: Get a row/column here somehow */
+            fprintf(stderr, "Error: Argument %d of function call had the "
+                "wrong type.\n", i + 1);
+            exit(EXIT_FAILURE);
         }
     }
 
@@ -356,7 +326,7 @@ void compile_proc_call(
     intermediates->count -= arg_count;
     intermediates->temporaries_count -= arg_count;
     /* discard proc */
-    if (!proc->push) intermediates->count -= 1;
+    pop_intermediate(intermediates);
 
     /* add result */
     buffer_maybe_grow(*intermediates, outputs.count);

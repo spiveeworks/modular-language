@@ -34,9 +34,6 @@ enum rpn_atom_type {
     RPN_VALUE,
     RPN_UNARY,
     RPN_BINARY,
-    /* TODO: remove this, stop deferring intermediates, just let them
-       accumulate as floating refs with no place on the stack. */
-    RPN_BINARY_REVERSE,
     RPN_GROUPING,
 };
 
@@ -95,15 +92,12 @@ struct precedence_info {
     {'.', PRECEDENCE_STRUCTURAL},
 };
 
-void push_rpn_ref(struct rpn_buffer *out, struct rpn_ref *ref) {
-    if (ref->push) {
-        struct rpn_atom it = {RPN_VALUE, ref->tk};
-        buffer_push(*out, it);
-    }
+void push_rpn_value(struct rpn_buffer *out, struct token tk) {
+    struct rpn_atom it = {RPN_VALUE, tk};
+    buffer_push(*out, it);
 }
 
 struct partial_operation {
-    struct rpn_ref arg; /* May or may not give an RPN_VALUE to push. */
     struct rpn_atom op; /* Can't be RPN_VALUE. */
     enum precedence_level precedence;
 };
@@ -115,21 +109,25 @@ struct partial_operation_buffer {
 };
 
 struct op_stack {
-    /* Represents something like  a || b && c == d +  */
+    /* If we have parsed something like a || b && c == d + e
+       then the RPN output will be `a b c d e`, but we won't know whether to
+       push `+` to the stack until we see what the next token is. */
     struct partial_operation_buffer lhs;
     /* This is the number of open brackets are in the parse stack, minus one if
        have_closing_token is trying to close a bracket. This lets us detect
        complete expressions in REPL mode. */
     int grouping_count;
 
-    /* Represents the subsequent e, which either groups to the left or to the
-       right. */
+    /* As we parse either we are waiting for another variable/literal/open
+       bracket, or we are waiting for another binary operation/close paren, or
+       we have both and need to unwind and output some operators into the RPN
+       buffer. have_next_ref represents whether we have the variable/literal
+       yet. */
     bool have_next_ref;
-    struct rpn_ref next_ref;
 
-    /* Represents the subsequent operation, which either causes a cascade of
-       binary operations to group together, or adds a new partial operation to
-       the stack. */
+    /* The subsequent operation that we want to put on the stack, which either
+       causes a cascade of higher precedence binary operations to be emitted,
+       or eventually gets added to the stack. */
     bool have_next_op;
     struct rpn_atom next_op;
     enum precedence_level next_precedence;
@@ -163,10 +161,9 @@ void read_next_ref(
     struct token tk = get_token(tokenizer);
 
     if (tk.id == TOKEN_NUMERIC || tk.id == TOKEN_ALPHANUM) {
-        /* Standard ref position token, record it and proceed to the cascade
+        /* Standard ref position token, emit it and proceed to the cascade
            part of the loop */
-        stack->next_ref.push = true;
-        stack->next_ref.tk = tk;
+        push_rpn_value(out, tk);
         stack->have_next_ref = true;
     } else if (tk.id == '(' || tk.id == '[' || tk.id == '{') {
         /* Nothing to cascade, just push the paren and continue. */
@@ -217,7 +214,6 @@ void read_next_op(
     /* postfix delimiters */
     if (tk.id == '[') {
         struct partial_operation new;
-        new.arg = stack->next_ref;
         new.op.type = RPN_GROUPING;
         new.op.tk = tk;
         new.op.multi_value_count = 0;
@@ -237,7 +233,6 @@ void read_next_op(
         return;
     } else if (tk.id == '(') {
         struct partial_operation new;
-        new.arg = stack->next_ref;
         new.op.type = RPN_GROUPING;
         new.op.tk = tk;
         new.op.multi_value_count = 0;
@@ -276,7 +271,6 @@ bool resolve_closing_token(
        something, so handle the closing bracket or try and return a
        final result or something. */
     if (stack->closing_token.id == ',') {
-        push_rpn_ref(out, &stack->next_ref);
         stack->have_next_ref = false;
         if (top) {
             if (top->precedence != PRECEDENCE_GROUPING) {
@@ -316,7 +310,6 @@ bool resolve_closing_token(
             exit(EXIT_FAILURE);
         }
 
-        push_rpn_ref(out, &stack->next_ref);
         *final_multi_value_count += 1;
 
         return true;
@@ -337,12 +330,9 @@ bool resolve_closing_token(
         /* Resolve the brackets. */
         stack->lhs.count -= 1;
         stack->have_closing_token = false;
-        /* Keep next_ref, as if the brackets had been replaced by a
-           single variable name. */
+        /* Keep have_next_ref, for the subexpression that we just build. */
     } else {
-        /* Push the value with one last comma, as if it were written
-           manually. */
-        push_rpn_ref(out, &stack->next_ref);
+        /* Push one last comma, as if it were written manually. */
         struct rpn_atom comma = {0};
         comma.type = RPN_GROUPING;
         comma.tk = stack->closing_token; /* For file location info. */
@@ -357,21 +347,12 @@ bool resolve_closing_token(
         buffer_push(*out, close);
 
         if (top->op.is_postfix) {
-            push_rpn_ref(out, &top->arg);
-            struct rpn_atom apply;
-            if (top->arg.push) {
-                apply.type = RPN_BINARY_REVERSE;
-            } else {
-                apply.type = RPN_BINARY;
-            }
-            apply.tk = top->op.tk;
-
+            struct rpn_atom apply = {RPN_BINARY, top->op.tk};
             buffer_push(*out, apply);
         }
 
         /* Whatever just happened, it gave us an expression, that might fill
            further holes on the left or the right. */
-        stack->next_ref.push = false;
         stack->have_next_ref = true;
 
         /* And now those opening and closing tokens are resolved. */
@@ -407,16 +388,10 @@ struct expr_parse_result parse_expression(
             pop = top && top->precedence != PRECEDENCE_GROUPING;
         }
         if (pop) {
-            push_rpn_ref(&out, &top->arg);
-            push_rpn_ref(&out, &stack.next_ref);
-            if (top->arg.push && !stack.next_ref.push) {
-                top->op.type = RPN_BINARY_REVERSE;
-            }
             buffer_push(out, top->op);
 
             /* E.g. goes from {a + b *; c; +}, to {a +; b * c; +}. */
             /* or {a * ( b +; c; )}, to {a * (; b + c; )}. */
-            stack.next_ref.push = false;
             stack.lhs.count--;
         } else if (stack.have_next_ref && stack.have_closing_token) {
             bool done = resolve_closing_token(
@@ -460,7 +435,6 @@ struct expr_parse_result parse_expression(
             /* We have a ref and an operation, and they didn't cause anything
                to pop, so push instead, and try again. */
             struct partial_operation new;
-            new.arg = stack.next_ref;
             new.op = stack.next_op;
             new.precedence = stack.next_precedence;
             buffer_push(stack.lhs, new);
@@ -488,8 +462,10 @@ enum emplace_type {
 
 struct emplace_info {
     size_t alloc_instruction_index;
-    size_t pointer_variable_index; /* The temp/intermediate index of the output
-                                      pointer. */
+
+    /* The index in the intermediates buffer of the output pointer. */
+    size_t pointer_intermediate_index;
+
     int multi_value_count;
     int size; /* Total size for structs, per-element size for arrays. */
     enum emplace_type emplace_type;
@@ -523,16 +499,7 @@ struct intermediate_buffer compile_expression(
                 out,
                 bindings,
                 &intermediates,
-                atom->tk,
-                false
-            );
-        } else if (atom->type == RPN_BINARY_REVERSE) {
-            compile_operation(
-                out,
-                bindings,
-                &intermediates,
-                atom->tk,
-                true
+                atom->tk
             );
         } else if (atom->type != RPN_GROUPING) {
             fprintf(stderr, "Error: Got unknown atom type in RPN "
@@ -564,7 +531,7 @@ struct intermediate_buffer compile_expression(
                 struct type array_type = type_array_of(type_int64);
                 struct ref array_temporary = push_intermediate(&intermediates, array_type);
 
-                next_emplace->pointer_variable_index = array_temporary.x;
+                next_emplace->pointer_intermediate_index = intermediates.count - 1;
             }
 
             next_emplace->multi_value_count = 0;
@@ -583,6 +550,8 @@ struct intermediate_buffer compile_expression(
             }
             if (em->emplace_type == EMPLACE_ARRAY) {
                 struct intermediate val = pop_intermediate(&intermediates);
+                struct intermediate *pointer_val =
+                    &intermediates.data[em->pointer_intermediate_index];
                 if (em->multi_value_count == 0) {
                     em->size = val.type.total_size;
 
@@ -590,7 +559,7 @@ struct intermediate_buffer compile_expression(
                     struct type *ty = malloc(sizeof(struct type));
                     *ty = val.type;
                     em->element_type = ty;
-                    intermediates.data[em->pointer_variable_index].type.inner = ty;
+                    pointer_val->type.inner = ty;
                 } else {
                     /* TODO: properly compare types to make sure the elements of
                        the array all agree */
@@ -604,8 +573,7 @@ struct intermediate_buffer compile_expression(
                 struct instruction instr;
                 instr.op = OP_ARRAY_STORE;
                 instr.flags = OP_64BIT;
-                instr.output.type = REF_TEMPORARY;
-                instr.output.x = em->pointer_variable_index;
+                instr.output = pointer_val->ref;
                 instr.arg1.type = REF_CONSTANT;
                 instr.arg1.x = em->multi_value_count;
                 /* TODO: rearrange this whole thing to store refs in a stack, and
@@ -642,18 +610,8 @@ struct intermediate_buffer compile_expression(
                loop was a while loop driven by manual increments, before we had
                an intermediate stack that we could just push refs onto without
                pushing them as actual temporaries. */
-            struct rpn_ref proc;
-            enum rpn_atom_type op_type = RPN_BINARY;
             i += 1;
-            if (in->data[i].type == RPN_VALUE) {
-                proc.push = true;
-                proc.tk = in->data[i].tk;
-                i += 1;
-                op_type = RPN_BINARY_REVERSE;
-            } else {
-                proc.push = false;
-            }
-            if (in->data[i].type != op_type || in->data[i].tk.id != '(') {
+            if (in->data[i].type != RPN_BINARY || in->data[i].tk.id != '(') {
                 fprintf(stderr, "Error: Got postfix parentheses in RPN "
                     "that weren't followed by function application?\n");
                 exit(EXIT_FAILURE);
@@ -663,7 +621,6 @@ struct intermediate_buffer compile_expression(
                 out,
                 bindings,
                 &intermediates,
-                &proc,
                 em.multi_value_count
             );
         } else if (atom->tk.id == ']') {
@@ -675,12 +632,13 @@ struct intermediate_buffer compile_expression(
             struct emplace_info em = buffer_pop(emplace_stack);
 
             if (em.emplace_type == EMPLACE_ARRAY) {
+                struct intermediate *pointer_val =
+                    &intermediates.data[em.pointer_intermediate_index];
                 struct instruction *alloc_instr =
                     &out->data[em.alloc_instruction_index];
                 alloc_instr->op = OP_ARRAY_ALLOC;
                 alloc_instr->flags = 0;
-                alloc_instr->output.type = REF_TEMPORARY;
-                alloc_instr->output.x = em.pointer_variable_index;
+                alloc_instr->output = pointer_val->ref;
                 alloc_instr->arg1.type = REF_STATIC_POINTER;
                 alloc_instr->arg1.x = (int64)em.element_type;
                 alloc_instr->arg2.type = REF_CONSTANT;
