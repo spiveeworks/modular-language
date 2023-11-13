@@ -34,6 +34,8 @@ enum rpn_atom_type {
     RPN_VALUE,
     RPN_UNARY,
     RPN_BINARY,
+    /* TODO: remove this, stop deferring intermediates, just let them
+       accumulate as floating refs with no place on the stack. */
     RPN_BINARY_REVERSE,
     RPN_GROUPING,
 };
@@ -500,150 +502,56 @@ struct emplace_stack {
     size_t capacity;
 };
 
-void compile_expression(
+struct intermediate_buffer compile_expression(
     struct instruction_buffer *out,
     struct record_table *bindings,
-    struct type_buffer *intermediates,
     struct rpn_buffer *in
 ) {
+    struct intermediate_buffer intermediates = {0};
     struct emplace_stack emplace_stack = {0};
 
-    int i = 0;
-    while (i < in->count) {
-        int j;
-        bool have_op = false;
-        enum rpn_atom_type type;
-        /* look ahead for patterns like 1 1 +, x y *, y *, etc. */
-        /* We have to defer putting atoms in the buffer so that this lookahead
-           becomes possible, because in all other situations a value atom means
-           PUSH A COPY TO THE CALL STACK, to call a function or procedure. That
-           said, this might change in the future, if we want to optimize things
-           like `var x := 1;` to a single instruction with no temporaries, or
-           similar for expressions like [x, y], then ONLY function calls
-           require these temporaries. Yes, this is totally the wrong way right
-           now, I should be storing a stack of references, like I did in
-           previous RPN shunting yard parsers. TODO */
-        for (j = 0; j < 3 && i + j < in->count; j++) {
-            type = in->data[i + j].type;
-            if (type == RPN_BINARY
-                || type == RPN_BINARY_REVERSE
-                || (j < 2 && type == RPN_UNARY))
-            {
-                have_op = true;
-                break;
-            } else if (type != RPN_VALUE) {
-                /* make sure have_op is false, if we get some grouping operator
-                   before any binary operators. */
-                break;
-            }
-        }
-        if (!have_op) {
-            j = 0;
-            type = in->data[i].type;
-        }
-
-        if (have_op) {
-            struct rpn_ref arg1;
-            struct rpn_ref arg2;
-            if (j >= 1) {
-                arg2.push = true;
-                arg2.tk = in->data[i + j - 1].tk;
-            } else {
-                arg2.push = false;
-            }
-            if (j >= 2) {
-                arg1.push = true;
-                arg1.tk = in->data[i + j - 2].tk;
-            } else {
-                arg1.push = false;
-            }
-            if (type == RPN_UNARY) {
-                fprintf(stderr, "Error: Unary operators are not yet "
-                    "implemented.\n");
-                exit(EXIT_FAILURE);
-            } if (type == RPN_BINARY) {
-                compile_operation(
-                    out,
-                    bindings,
-                    intermediates,
-                    &arg1,
-                    &arg2,
-                    in->data[i + j].tk
-                );
-            } else if (type == RPN_BINARY_REVERSE) {
-                compile_operation(
-                    out,
-                    bindings,
-                    intermediates,
-                    &arg2,
-                    &arg1,
-                    in->data[i + j].tk
-                );
-            } else {
-                fprintf(stderr, "Error: have_op without type that is an "
-                    "op?\n");
-                exit(EXIT_FAILURE);
-            }
-        } else if (type == RPN_VALUE) {
-            enum operation_flags flags = 0;
-
-            struct ref ref = compile_value_token(bindings, &in->data[i].tk);
-            if (ref.type == REF_CONSTANT) {
-                buffer_push(*intermediates, type_int64);
-                flags = OP_64BIT;
-            } else {
-                int index;
-                if (ref.type == REF_GLOBAL) {
-                    index = ref.x;
-                } else if (ref.type == REF_LOCAL) {
-                    index = bindings->global_count + ref.x;
-                } else {
-                    fprintf(stderr, "Error: Got unknown ref type during mov "
-                        "compilation?\n");
-                    exit(EXIT_FAILURE);
-                }
-                struct type *binding_type = &bindings->data[index].type;
-
-                buffer_push(*intermediates, *binding_type);
-                if (binding_type->connective == TYPE_INT) {
-                    if (binding_type->word_size != 3) {
-                        fprintf(stderr, "Error: Move instructions are only "
-                            "implemented for 64 bit integers.\n");
-                        exit(EXIT_FAILURE);
-                    }
-
-                    flags = OP_64BIT;
-                } else if (binding_type->connective == TYPE_ARRAY) {
-                    flags = OP_SHARED_BUFF;
-                }
-            }
-
-            struct instruction instr;
-            instr.op = OP_MOV;
-            instr.flags = flags;
-            instr.output.type = REF_TEMPORARY;
-            instr.output.x = intermediates->count - 1;
-            instr.arg1 = ref;
-            instr.arg2.type = REF_NULL;
-            buffer_push(*out, instr);
-        } else if (type != RPN_GROUPING) {
+    for (int i = 0; i < in->count; i++) {
+        struct rpn_atom *atom = &in->data[i];
+        if (atom->type == RPN_VALUE) {
+            compile_value_token(bindings, &intermediates, &atom->tk);
+        } else if (atom->type == RPN_UNARY) {
+            fprintf(stderr, "Error: Unary operators are not yet "
+                "implemented.\n");
+            exit(EXIT_FAILURE);
+        } else if (atom->type == RPN_BINARY) {
+            compile_operation(
+                out,
+                bindings,
+                &intermediates,
+                atom->tk,
+                false
+            );
+        } else if (atom->type == RPN_BINARY_REVERSE) {
+            compile_operation(
+                out,
+                bindings,
+                &intermediates,
+                atom->tk,
+                true
+            );
+        } else if (atom->type != RPN_GROUPING) {
             fprintf(stderr, "Error: Got unknown atom type in RPN "
                 "compilation?\n");
             exit(EXIT_FAILURE);
-        } else if (in->data[i].tk.id == '(') {
+        } else if (atom->tk.id == '(') {
             struct emplace_info *next_emplace = buffer_addn(emplace_stack, 1);
 
-            if (in->data[i].is_postfix) {
+            if (atom->is_postfix) {
                 next_emplace->alloc_instruction_index = -1;
                 next_emplace->emplace_type = EMPLACE_CALL;
             }
 
             next_emplace->multi_value_count = 0;
             next_emplace->size = 0;
-        } else if (in->data[i].tk.id == '[') {
+        } else if (atom->tk.id == '[') {
             struct emplace_info *next_emplace = buffer_addn(emplace_stack, 1);
 
-            if (in->data[i].is_postfix) {
+            if (atom->is_postfix) {
                 next_emplace->alloc_instruction_index = -1;
                 next_emplace->emplace_type = EMPLACE_INDEX;
             } else {
@@ -653,41 +561,43 @@ void compile_expression(
 
                 /* TODO: how do I handle these array types?? What kinds of type
                    inference am I planning on having? */
-                next_emplace->pointer_variable_index = intermediates->count;
                 struct type array_type = type_array_of(type_int64);
-                buffer_push(*intermediates, array_type);
+                struct ref array_temporary = push_intermediate(&intermediates, array_type);
+
+                next_emplace->pointer_variable_index = array_temporary.x;
             }
 
             next_emplace->multi_value_count = 0;
             next_emplace->size = 0;
-        } else if (in->data[i].tk.id == '{') {
+        } else if (atom->tk.id == '{') {
             fprintf(stderr, "Error: Struct literals are not yet "
                 "implemented.\n");
             exit(EXIT_FAILURE);
-        } else if (in->data[i].tk.id == ',') {
+        } else if (atom->tk.id == ',') {
             struct emplace_info *em = buffer_top(emplace_stack);
             if (!em) {
                 fprintf(stderr, "Error at line %d, %d: Multi-values are not "
-                    "yet implemented.\n", in->data[i].tk.row,
-                    in->data[i].tk.column);
+                    "yet implemented.\n", atom->tk.row,
+                    atom->tk.column);
                 exit(EXIT_FAILURE);
             }
             if (em->emplace_type == EMPLACE_ARRAY) {
-                struct type *ty = buffer_top(*intermediates);
+                struct intermediate val = pop_intermediate(&intermediates);
                 if (em->multi_value_count == 0) {
-                    em->size = ty->total_size;
+                    em->size = val.type.total_size;
 
                     /* TODO: actually garbage collect this type info?? idk */
-                    em->element_type = malloc(sizeof(struct type));
-                    *em->element_type = *ty;
-                    *intermediates->data[em->pointer_variable_index].inner = *ty;
+                    struct type *ty = malloc(sizeof(struct type));
+                    *ty = val.type;
+                    em->element_type = ty;
+                    intermediates.data[em->pointer_variable_index].type.inner = ty;
                 } else {
                     /* TODO: properly compare types to make sure the elements of
                        the array all agree */
-                    if (em->size != ty->total_size) {
+                    if (em->size != val.type.total_size) {
                         fprintf(stderr, "Error at line %d, %d: Array elements had "
-                            "different sizes.\n", in->data[i].tk.row,
-                            in->data[i].tk.column);
+                            "different sizes.\n", atom->tk.row,
+                            atom->tk.column);
                         exit(EXIT_FAILURE);
                     }
                 }
@@ -700,22 +610,22 @@ void compile_expression(
                 instr.arg1.x = em->multi_value_count;
                 /* TODO: rearrange this whole thing to store refs in a stack, and
                    pop arg2 from that. */
-                instr.arg2.type = REF_TEMPORARY;
-                instr.arg2.x = intermediates->count - 1;
+                instr.arg2 = val.ref;
                 buffer_push(*out, instr);
-                intermediates->count -= 1;
-            } else if (em->emplace_type == EMPLACE_CALL || em->emplace_type == EMPLACE_INDEX) {
-                /* Do nothing, just leave the value on the stack, and continue
-                   to count the multi-values. */
+            } else if (em->emplace_type == EMPLACE_CALL) {
+                compile_push(out, &intermediates);
+            } else if (em->emplace_type == EMPLACE_INDEX) {
+                /* Do nothing, just leave the ref in the intermediate buffer,
+                   and look for the close bracket. */
             } else {
                 fprintf(stderr, "Error at line %d, %d: Multi-value "
                     "encountered with unknown emplace type %d.\n",
-                    in->data[i].tk.row, in->data[i].tk.column,
+                    atom->tk.row, atom->tk.column,
                     em->emplace_type);
                 exit(EXIT_FAILURE);
             }
             em->multi_value_count += 1;
-        } else if (in->data[i].tk.id == ')') {
+        } else if (atom->tk.id == ')') {
             if (emplace_stack.count <= 0) {
                 fprintf(stderr, "Error: Tried to compile unmatched close "
                     "paren?\n");
@@ -728,38 +638,35 @@ void compile_expression(
                 exit(EXIT_FAILURE);
             }
 
+            /* Hacky, but we increase i manually here. Originally this whole
+               loop was a while loop driven by manual increments, before we had
+               an intermediate stack that we could just push refs onto without
+               pushing them as actual temporaries. */
             struct rpn_ref proc;
-            if (in->data[i + 1].type == RPN_VALUE) {
+            enum rpn_atom_type op_type = RPN_BINARY;
+            i += 1;
+            if (in->data[i].type == RPN_VALUE) {
                 proc.push = true;
-                proc.tk = in->data[i + 1].tk;
-                j = 2;
-                if (in->data[i + j].type != RPN_BINARY_REVERSE
-                    || in->data[i + j].tk.id != '(')
-                {
-                    fprintf(stderr, "Error: Got postfix parentheses in RPN "
-                        "that weren't followed by function application?\n");
-                    exit(EXIT_FAILURE);
-                }
+                proc.tk = in->data[i].tk;
+                i += 1;
+                op_type = RPN_BINARY_REVERSE;
             } else {
                 proc.push = false;
-                j = 1;
-                if (in->data[i + j].type != RPN_BINARY
-                    || in->data[i + j].tk.id != '(')
-                {
-                    fprintf(stderr, "Error: Got postfix parentheses in RPN "
-                        "that weren't followed by function application?\n");
-                    exit(EXIT_FAILURE);
-                }
+            }
+            if (in->data[i].type != op_type || in->data[i].tk.id != '(') {
+                fprintf(stderr, "Error: Got postfix parentheses in RPN "
+                    "that weren't followed by function application?\n");
+                exit(EXIT_FAILURE);
             }
 
             compile_proc_call(
                 out,
                 bindings,
-                intermediates,
+                &intermediates,
                 &proc,
                 em.multi_value_count
             );
-        } else if (in->data[i].tk.id == ']') {
+        } else if (atom->tk.id == ']') {
             if (emplace_stack.count <= 0) {
                 fprintf(stderr, "Error: Tried to compile unmatched close "
                     "bracket?\n");
@@ -782,7 +689,7 @@ void compile_expression(
                 if (em.multi_value_count != 1) {
                     fprintf(stderr, "Error at line %d, %d: Array index "
                         "operations must be a single index.\n",
-                        in->data[i].tk.row, in->data[i].tk.column);
+                        atom->tk.row, atom->tk.column);
                     exit(EXIT_FAILURE);
                 }
 
@@ -791,29 +698,29 @@ void compile_expression(
                    so now we can just continue as if this were setting up for a
                    normal stack-based binary operation. */
             }
-        } else if (in->data[i].tk.id == '}') {
+        } else if (atom->tk.id == '}') {
             fprintf(stderr, "Error: Struct literals are not yet "
                 "implemented.\n");
             exit(EXIT_FAILURE);
         } else {
             fprintf(stderr, "Error at line %d, %d: Unknown/unimplemented "
-                "grouping token '", in->data[i].tk.row, in->data[i].tk.column);
-            fputstr(in->data[i].tk.it, stderr);
+                "grouping token '", atom->tk.row, atom->tk.column);
+            fputstr(atom->tk.it, stderr);
             fprintf(stderr, "'\n");
             exit(EXIT_FAILURE);
         }
-
-        i = i + j + 1;
     }
 
     buffer_free(emplace_stack);
+
+    return intermediates;
 }
 
 void assert_match_pattern(
     struct instruction_buffer *out,
     struct record_table *bindings,
     struct rpn_buffer *pattern,
-    struct type_buffer *values,
+    struct intermediate_buffer *values,
     bool global
 ) {
     /* TODO: do I want to bind these forwards? Or backwards? */
@@ -848,8 +755,8 @@ void assert_match_pattern(
 
         struct record_entry *new = buffer_addn(*bindings, 1);
         new->name = name->tk.it;
-        struct type val_type = buffer_pop(*values);
-        new->type = val_type;
+        struct intermediate val = buffer_pop(*values);
+        new->type = val.type;
 
         struct ref new_var = {REF_LOCAL, bindings->count - 1};
         if (global) {
@@ -857,24 +764,7 @@ void assert_match_pattern(
             bindings->global_count = bindings->count;
         }
 
-        /* TODO: Make a procedure for these mov operations. */
-        struct instruction instr;
-        instr.op = OP_MOV;
-        if (val_type.connective == TYPE_INT) {
-            if (val_type.word_size != 3) {
-                fprintf(stderr, "Error: Assignment is not currently supported "
-                    "for scalars other than int64.\n");
-                exit(EXIT_FAILURE);
-            }
-            instr.flags = OP_64BIT;
-        } else if (val_type.connective == TYPE_ARRAY) {
-            instr.flags = OP_SHARED_BUFF;
-        }
-        instr.output = new_var;
-        instr.arg1.type = REF_TEMPORARY;
-        instr.arg1.x = values->count;
-        instr.arg2.type = REF_NULL;
-        buffer_push(*out, instr);
+        compile_mov(out, new_var, val.ref, &val.type);
 
         if (pattern->count == 1 && values->count > 0) {
             struct token *tk = &pattern->data[0].tk;

@@ -23,7 +23,6 @@ void parse_statement(
             exit(EXIT_FAILURE);
         }
 
-        struct type_buffer intermediates = {0};
         struct expr_parse_result lhs = parse_expression(tokenizer, end_on_eol);
 
         tk = get_token(tokenizer);
@@ -35,10 +34,9 @@ void parse_statement(
             exit(EXIT_FAILURE);
         }
 
-        compile_expression(
+        struct intermediate_buffer intermediates = compile_expression(
             out,
             bindings,
-            &intermediates,
             &lhs.atoms
         );
 
@@ -56,15 +54,13 @@ void parse_statement(
 
         tk = get_token(tokenizer);
         if (tk.id == ';') {
-            struct type_buffer intermediates = {0};
-
-            compile_expression(
+            struct intermediate_buffer intermediates = compile_expression(
                 out,
                 bindings,
-                &intermediates,
                 &lhs.atoms
             );
 
+            /* TODO: pop the intermediates somehow??? */
             buffer_free(lhs.atoms);
             buffer_free(intermediates);
         } else if (tk.id == TOKEN_DEFINE) {
@@ -86,11 +82,9 @@ void parse_statement(
             }
 
             /* TODO: reuse intermediates buffer. */
-            struct type_buffer intermediates = {0};
-            compile_expression(
+            struct intermediate_buffer intermediates = compile_expression(
                 out,
                 bindings,
-                &intermediates,
                 &rhs.atoms
             );
             buffer_free(rhs.atoms);
@@ -246,12 +240,9 @@ struct record_entry parse_procedure(
             exit(EXIT_FAILURE);
         }
 
-        struct type_buffer intermediates = {0};
-
-        compile_expression(
+        struct intermediate_buffer intermediates = compile_expression(
             out,
             bindings,
-            &intermediates,
             &lhs.atoms
         );
 
@@ -260,10 +251,14 @@ struct record_entry parse_procedure(
         compile_return(out, &intermediates);
         /* TODO: Unify these outputs */
         if (!result_specified) {
-            output_types = intermediates;
+            for (int i = 0; i < intermediates.count; i++) {
+                buffer_push(output_types, intermediates.data[i].type);
+            }
         } else {
             type_check_return(&output_types, &intermediates, proc_name);
         }
+
+        buffer_free(intermediates);
     } else if (tk.id == '{') {
         while (true) {
             struct token tk = get_token(tokenizer);
