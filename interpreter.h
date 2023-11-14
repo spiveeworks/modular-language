@@ -139,8 +139,12 @@ struct execution_frame {
     size_t count;
     size_t current;
 
+    /* Stack offset where function args/locals start for this frame. */
     size_t locals_start;
     size_t locals_count;
+    /* Stack offset where function results should be written to. Usually this
+       is equal to locals_start. */
+    size_t results_start;
 };
 
 /* Tracks bytecode indices for calling and returning between functions, and
@@ -214,6 +218,7 @@ void call_stack_push_exec_frame(
 
     frame->locals_start = stack->vars.count;
     frame->locals_count = 0;
+    frame->results_start = stack->vars.count;
 }
 
 /* Try to decode the ref, but only crash if it is corrupted, not if it is
@@ -430,28 +435,21 @@ void continue_execution(
             break;
         case OP_CALL:
         {
-            if (next->arg1.type == REF_TEMPORARY) {
-                /* unbind it early, and shift all the arguments back one */
-                /* This little expense should usually be unnecessary, and saves
-                   a big headache of tombstones inside multivalues that we do
-                   nooot want to deal with. */
-                int index = frame->locals_start + frame->locals_count
-                    + next->arg1.x;
-                unbind_variable(&stack->vars, index);
-
-                for (int i = index + 1; i < stack->vars.count; i++) {
-                    stack->vars.data[i - 1] = stack->vars.data[i];
-                }
-                stack->vars.count -= 1;
-            }
-
             struct execution_frame new;
-
             new.start = procedures.data[arg1].instructions.data;
             new.count = procedures.data[arg1].instructions.count;
             new.current = 0;
             new.locals_start = stack->vars.count - arg2;
             new.locals_count = arg2;
+            if (next->arg1.type == REF_TEMPORARY) {
+                /* Unbind the variable, and let the results overwrite it. */
+                int index = frame->locals_start + frame->locals_count
+                    + next->arg1.x;
+                unbind_variable(&stack->vars, index);
+                new.results_start = new.locals_start - 1;
+            } else {
+                new.results_start = new.locals_start;
+            }
 
             buffer_push(stack->exec, new);
 
@@ -461,7 +459,7 @@ void continue_execution(
         {
             /* Unbind all variables that aren't being returned. */
             int source_offset = stack->vars.count - arg1;
-            int dest_offset = frame->locals_start;
+            int dest_offset = frame->results_start;
             for (int i = dest_offset; i < source_offset; i++) {
                 unbind_variable(&stack->vars, i);
             }
