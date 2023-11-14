@@ -6,49 +6,50 @@
 #include "tokenizer.h"
 #include "compiler_primitives.h"
 
-/* This file converts infix expressions into postfix RPN buffers, and also
-   compiles RPN buffers into bytecode instructions. In this way we abstract
-   over the basic building blocks of builtin operations like `+` to create the
-   primitives needed for more complex syntactical constructs. */
+/* This file converts infix expressions into postfix RPN-ish buffers, and also
+   compiles RPN buffers into bytecode instructions. This builds on
+   compiler_primitives.h to build complex syntactical expressions, but provides
+   no concept of statements, assignment, or statement-based control flow. */
 
-/***************************************/
-/* Reverse Polish Notation Expressions */
-/***************************************/
+/********************/
+/* Pattern Commands */
+/********************/
 
-/* The spirit of the parser is USUALLY to follow a naive postfix approach for
-   representing everything. calculate intermediate values using constants and
-   variables, push them onto the stack, crush them down to new intermediate
-   values using other operations, function calls, etc. and finally write the
-   result to named variable. The exception to this is in situations where we
-   need hints from prefix parsing in order to make compilation easier or more
-   powerful; in these situations we might add atoms _before_ some intermediate
-   values are calculated, so that some work can be done before any of those
-   intermediate values get compiled, e.g. to allocate an array before filling
-   it with values. Note also that we defer pushing constants and variables on
-   until just before they are consumed by an operator, which sometimes requires
-   reversing a binary operator, so that e.g. a constant can be divided by a
-   complex subexpression. We shouldn't need to implement this deferral during
-   parsing, though! TODO */
+enum pattern_command_type {
+    PATTERN_DECL,
+    PATTERN_VALUE,
 
-enum rpn_atom_type {
-    RPN_VALUE,
-    RPN_UNARY,
-    RPN_BINARY,
-    RPN_GROUPING,
+    PATTERN_UNARY,
+    PATTERN_BINARY,
+
+    PATTERN_PROCEDURE_CALL,
+    PATTERN_ARRAY,
+    PATTERN_STRUCT,
+
+    PATTERN_END_ARG,
+    PATTERN_END_TERM
 };
 
-struct rpn_atom {
-    enum rpn_atom_type type;
+struct pattern_command {
+    enum pattern_command_type type;
+
+    bool takes_ref;
+
     struct token tk;
-    int multi_value_count;
-    bool is_postfix;
+
+    int arg_count;
+    size_t arg_command_count;
 };
 
 /* This is like our AST, but we will be compiling it as soon as possible. */
-struct rpn_buffer {
-    struct rpn_atom *data;
+struct pattern {
+    struct pattern_command *data;
     size_t count;
     size_t capacity;
+
+    int multi_value_count;
+    bool valid_pattern;
+    bool valid_expression;
 };
 
 /*********************/
@@ -92,14 +93,31 @@ struct precedence_info {
     {'.', PRECEDENCE_STRUCTURAL},
 };
 
-void push_rpn_value(struct rpn_buffer *out, struct token tk) {
-    struct rpn_atom it = {RPN_VALUE, tk};
-    buffer_push(*out, it);
-}
+enum partial_operation_type {
+    PARTIAL_BINARY,
 
+    PARTIAL_PAREN,
+
+    PARTIAL_INDEX,
+    PARTIAL_PROCEDURE_CALL,
+    PARTIAL_ARRAY,
+    /*
+    PARTIAL_STRUCT,
+    */
+};
+
+/* A pattern_command that is still accumulating inputs. */
 struct partial_operation {
-    struct rpn_atom op; /* Can't be RPN_VALUE. */
+    enum partial_operation_type type;
     enum precedence_level precedence;
+
+    bool takes_ref;
+
+    struct token op;
+
+    int arg_count;
+    size_t arg_command_count;
+    size_t open_command_index;
 };
 
 struct partial_operation_buffer {
@@ -129,7 +147,7 @@ struct op_stack {
        causes a cascade of higher precedence binary operations to be emitted,
        or eventually gets added to the stack. */
     bool have_next_op;
-    struct rpn_atom next_op;
+    struct token next_op;
     enum precedence_level next_precedence;
 
     /* Represents a closing bracket or semicolon that will pop results until
@@ -138,12 +156,6 @@ struct op_stack {
     bool have_closing_token;
     enum token_id opening_id;
     struct token closing_token;
-};
-
-struct expr_parse_result {
-    bool has_ref_decl;
-    struct rpn_buffer atoms;
-    int multi_value_count;
 };
 
 /* The basic heart beat of expression parsing: roughly every second token is in
@@ -156,32 +168,41 @@ struct expr_parse_result {
 void read_next_ref(
     struct tokenizer *tokenizer,
     struct op_stack *stack,
-    struct rpn_buffer *out
+    struct pattern *out
 ) {
     struct token tk = get_token(tokenizer);
 
     if (tk.id == TOKEN_NUMERIC || tk.id == TOKEN_ALPHANUM) {
         /* Standard ref position token, emit it and proceed to the cascade
            part of the loop */
-        push_rpn_value(out, tk);
+        struct pattern_command val = {PATTERN_VALUE};
+        val.tk = tk;
+        buffer_push(*out, val);
         stack->have_next_ref = true;
-    } else if (tk.id == '(' || tk.id == '[' || tk.id == '{') {
+    } else if (tk.id == '(') {
         /* Nothing to cascade, just push the paren and continue. */
-        struct partial_operation new;
-        new.op.type = RPN_GROUPING;
-        new.op.tk = tk;
-        new.op.multi_value_count = 0;
-        new.op.is_postfix = false;
-        new.precedence = PRECEDENCE_GROUPING;
+        struct partial_operation new = {PARTIAL_PAREN, PRECEDENCE_GROUPING};
+        new.op = tk; /* For errors, I guess. */
+        buffer_push(stack->lhs, new);
+        stack->grouping_count += 1;
+    } else if (tk.id == '[') {
+        /* Nothing to cascade, just push the paren and continue. */
+        struct partial_operation new = {PARTIAL_ARRAY, PRECEDENCE_GROUPING};
+        new.op = tk; /* For errors, I guess. */
+        new.open_command_index = out->count;
         buffer_push(stack->lhs, new);
         stack->grouping_count += 1;
 
-        if (tk.id != '(') {
-            /* for '[' and '{' we actually want to store an atom in the
-               rpn_buffer straight away, so that the compiler can make
-               an instruction to allocate memory up front. */
-            buffer_push(*out, new.op);
-        }
+        struct pattern_command command = {PATTERN_ARRAY};
+        command.tk = tk;
+        /* for '[' and '{' we actually want to store a command in the buffer
+           straight away, so that the compiler can make an instruction to
+           allocate memory up front. */
+        buffer_push(*out, command);
+    } else if (tk.id == '{') {
+        fprintf(stderr, "Error at line %d, %d: Struct literals are not yet "
+            "implemented.\n", tk.row, tk.column);
+        exit(EXIT_FAILURE);
     } else {
         /* We MUST get a ref if we are at the start of an expression, or if we
            just got an infix operator. Anything else is therefore an error. */
@@ -196,15 +217,14 @@ void read_next_ref(
 void read_next_op(
     struct tokenizer *tokenizer,
     struct op_stack *stack,
-    struct rpn_buffer *out
+    struct pattern *out
 ) {
     struct token tk = get_token(tokenizer);
 
     /* infix operators */
     for (int i = 0; i < ARRAY_LENGTH(precedence_info); i++) {
         if (tk.id == precedence_info[i].operator) {
-            stack->next_op.type = RPN_BINARY;
-            stack->next_op.tk = tk;
+            stack->next_op = tk;
             stack->next_precedence = precedence_info[i].precedence;
             stack->have_next_op = true;
             return;
@@ -213,38 +233,29 @@ void read_next_op(
 
     /* postfix delimiters */
     if (tk.id == '[') {
-        struct partial_operation new;
-        new.op.type = RPN_GROUPING;
-        new.op.tk = tk;
-        new.op.multi_value_count = 0;
-        new.op.is_postfix = true;
-        new.precedence = PRECEDENCE_GROUPING;
+        struct partial_operation new = {PARTIAL_INDEX, PRECEDENCE_GROUPING};
+        new.op = tk; /* For errors, I guess. */
         buffer_push(stack->lhs, new);
         stack->grouping_count += 1;
 
         stack->have_next_ref = false;
-
-        /* Push the opening bracket, to help with parsing. */
-        /* This is the only place we use `out` in this procedure, and it is
-           kind of unnecessary... Ah well. */
-        buffer_push(*out, new.op);
 
         /* Still have no op. Proceed to ref position. */
         return;
     } else if (tk.id == '(') {
-        struct partial_operation new;
-        new.op.type = RPN_GROUPING;
-        new.op.tk = tk;
-        new.op.multi_value_count = 0;
-        new.op.is_postfix = true;
-        new.precedence = PRECEDENCE_GROUPING;
+        struct partial_operation new = {PARTIAL_PROCEDURE_CALL, PRECEDENCE_GROUPING};
+        new.op = tk; /* For errors, I guess. */
+        new.open_command_index = out->count;
         buffer_push(stack->lhs, new);
         stack->grouping_count += 1;
 
         stack->have_next_ref = false;
 
-        /* Push the opening bracket, to help with parsing. */
-        buffer_push(*out, new.op);
+        /* Not sure how to handle function overloads with this approach... May
+           need to go back to deferring value compilation, haha. */
+        struct pattern_command command = {PATTERN_PROCEDURE_CALL};
+        command.tk = tk;
+        buffer_push(*out, command);
 
         /* Still have no op. Proceed to ref position. */
         return;
@@ -263,8 +274,7 @@ void read_next_op(
 
 bool resolve_closing_token(
     struct op_stack *stack,
-    struct rpn_buffer *out,
-    int *final_multi_value_count
+    struct pattern *out
 ) {
     struct partial_operation *top = buffer_top(stack->lhs);
     /* Can't pop any more, but have hit a delimiter or comma or
@@ -279,24 +289,27 @@ bool resolve_closing_token(
                         "push a value into a non-grouping token?\n");
                 exit(EXIT_FAILURE);
             }
-            top->op.multi_value_count += 1;
+            top->arg_count += 1;
 
-            if (top->op.tk.id == '(' && !top->op.is_postfix) {
+            if (top->type == PARTIAL_PAREN) {
                 fprintf(stderr, "Error at line %d, %d: There was a "
                         "comma inside grouping parentheses.\n",
-                        top->op.tk.row, top->op.tk.column);
+                        top->op.row, top->op.column);
                 exit(EXIT_FAILURE);
             }
 
             /* Take the result that was just calculated, and write it
                into whatever array or struct is being built. This is
                denoted with a single comma token in the RPN buffer. */
-            struct rpn_atom *comma = buffer_addn(*out, 1);
-            comma->type = RPN_GROUPING;
-            comma->tk = stack->closing_token;
+            struct pattern_command comma = {PATTERN_END_ARG};
+            comma.tk = stack->closing_token;
+            buffer_push(*out, comma);
         } else {
+            struct pattern_command comma = {PATTERN_END_TERM};
+            comma.tk = stack->closing_token;
+            buffer_push(*out, comma);
             /* Just let the cascaded result exist on the stack. */
-            *final_multi_value_count += 1;
+            out->multi_value_count += 1;
         }
 
         stack->have_closing_token = false;
@@ -310,7 +323,7 @@ bool resolve_closing_token(
             exit(EXIT_FAILURE);
         }
 
-        *final_multi_value_count += 1;
+        out->multi_value_count += 1;
 
         return true;
     } else if (!top) {
@@ -319,37 +332,50 @@ bool resolve_closing_token(
         fputstr(stack->closing_token.it, stderr);
         fprintf(stderr, "\" while parsing expression.\n");
         exit(EXIT_FAILURE);
-    } else if (stack->opening_id != top->op.tk.id) {
+    } else if (stack->opening_id != top->op.id) {
         fprintf(stderr, "Error on line %d, %d: Got incorrectly "
                 "matched brackets \"%c\" and \"%c\" while parsing "
                 "expression.", stack->closing_token.row,
-                stack->closing_token.column, top->op.tk.id,
+                stack->closing_token.column, top->op.id,
                 stack->closing_token.id);
         exit(EXIT_FAILURE);
-    } else if (stack->closing_token.id == ')' && !top->op.is_postfix) {
+    } else if (top->type == PARTIAL_PAREN) {
+        /* Resolve the brackets. */
+        stack->lhs.count -= 1;
+        stack->have_closing_token = false;
+        /* Keep have_next_ref, for the subexpression that we just build. */
+    } else if (top->type == PARTIAL_INDEX) {
+        top->arg_count += 1;
+        if (top->arg_count > 1) {
+            fprintf(stderr, "Error at line %d, %d: Multidimensional array "
+                "index is not yet supported.\n",
+                stack->closing_token.row, stack->closing_token.column);
+            exit(EXIT_FAILURE);
+        }
+
+        /* '[' is listed as the binary operation for array indexing, even
+           though that's not how it is parsed. We can still *pretend* that is
+           how it was parsed, though! */
+        struct pattern_command op = {PATTERN_BINARY};
+        op.tk = top->op;
+        buffer_push(*out, op);
+
         /* Resolve the brackets. */
         stack->lhs.count -= 1;
         stack->have_closing_token = false;
         /* Keep have_next_ref, for the subexpression that we just build. */
     } else {
         /* Push one last comma, as if it were written manually. */
-        struct rpn_atom comma = {0};
-        comma.type = RPN_GROUPING;
-        comma.tk = stack->closing_token; /* For file location info. */
-        comma.tk.id = ','; /* For actual parsing logic. */
+        top->arg_count += 1;
+
+        struct pattern_command comma = {PATTERN_END_ARG};
         buffer_push(*out, comma);
-        top->op.multi_value_count += 1;
 
-        struct rpn_atom close;
-        close.type = RPN_GROUPING;
-        close.tk = stack->closing_token;
-        close.multi_value_count = top->op.multi_value_count;
-        buffer_push(*out, close);
-
-        if (top->op.is_postfix) {
-            struct rpn_atom apply = {RPN_BINARY, top->op.tk};
-            buffer_push(*out, apply);
-        }
+        struct pattern_command *open =
+            &out->data[top->open_command_index];
+        open->arg_count = top->arg_count;
+        open->arg_command_count =
+            stack->lhs.count - top->open_command_index - 1;
 
         /* Whatever just happened, it gave us an expression, that might fill
            further holes on the left or the right. */
@@ -363,13 +389,11 @@ bool resolve_closing_token(
     return false;
 }
 
-struct expr_parse_result parse_expression(
+struct pattern parse_expression(
     struct tokenizer *tokenizer,
     bool end_on_eol
 ) {
-    bool has_ref_decl = false;
-    struct rpn_buffer out = {0};
-    int final_multi_value_count = 0;
+    struct pattern result = {0};
 
     struct op_stack stack = {0};
     while (true) {
@@ -388,33 +412,25 @@ struct expr_parse_result parse_expression(
             pop = top && top->precedence != PRECEDENCE_GROUPING;
         }
         if (pop) {
-            buffer_push(out, top->op);
+            struct pattern_command op = {PATTERN_BINARY};
+            op.tk = top->op;
+            buffer_push(result, op);
 
             /* E.g. goes from {a + b *; c; +}, to {a +; b * c; +}. */
             /* or {a * ( b +; c; )}, to {a * (; b + c; )}. */
             stack.lhs.count--;
         } else if (stack.have_next_ref && stack.have_closing_token) {
-            bool done = resolve_closing_token(
-                &stack,
-                &out,
-                &final_multi_value_count
-            );
+            bool done = resolve_closing_token(&stack, &result);
 
             if (done) {
                 put_token_back(tokenizer, stack.closing_token);
 
                 /* Now finish up. */
                 buffer_free(stack.lhs);
-
-                struct expr_parse_result result;
-                result.has_ref_decl = has_ref_decl;
-                result.atoms = out;
-                result.multi_value_count = final_multi_value_count;
-
                 return result;
             }
         } else if (!stack.have_next_ref) {
-            read_next_ref(tokenizer, &stack, &out);
+            read_next_ref(tokenizer, &stack, &result);
         } else if (!stack.have_next_op) {
             if (end_on_eol && stack.grouping_count == 0
                 && tokenizer_peek_eol(tokenizer))
@@ -429,7 +445,7 @@ struct expr_parse_result parse_expression(
                 stack.closing_token.column = tokenizer->column;
                 stack.opening_id = TOKEN_NULL;
             } else {
-                read_next_op(tokenizer, &stack, &out);
+                read_next_op(tokenizer, &stack, &result);
             }
         } else {
             /* We have a ref and an operation, and they didn't cause anything
@@ -454,21 +470,16 @@ struct expr_parse_result parse_expression(
 /* TODO: Should really name this stuff multivalue_etc, because it isn't always
    about emplacement, even thought emplacement was the first case I had to make
    this stack to handle. Or... maybe it should just be emplacement? */
-enum emplace_type {
-    EMPLACE_CALL,
-    EMPLACE_ARRAY,
-    EMPLACE_INDEX,
-};
-
 struct emplace_info {
+    enum pattern_command_type type;
     size_t alloc_instruction_index;
 
     /* The index in the intermediates buffer of the output pointer. */
     size_t pointer_intermediate_index;
 
-    int multi_value_count;
+    int args_handled;
+    int args_total;
     int size; /* Total size for structs, per-element size for arrays. */
-    enum emplace_type emplace_type;
     struct type *element_type;
 };
 
@@ -478,194 +489,175 @@ struct emplace_stack {
     size_t capacity;
 };
 
+void compile_begin_emplace(
+    struct instruction_buffer *out,
+    struct intermediate_buffer *intermediates,
+    struct emplace_stack *emplace_stack,
+    struct pattern_command *c
+) {
+    struct emplace_info *next_emplace = buffer_addn(*emplace_stack, 1);
+    next_emplace->type = c->type;
+    if (c->type == PATTERN_ARRAY) {
+        next_emplace->alloc_instruction_index = out->count;
+        buffer_change_count(*out, 1);
+        next_emplace->size = 0;
+
+        struct type array_type = type_array_of(type_int64);
+        struct ref array_temporary = push_intermediate(intermediates, array_type);
+
+        next_emplace->pointer_intermediate_index = intermediates->count - 1;
+    } else if (c->type == PATTERN_STRUCT) {
+        fprintf(stderr, "Error: Struct literals are not yet "
+            "implemented.\n");
+        exit(EXIT_FAILURE);
+    } else {
+        next_emplace->alloc_instruction_index = -1;
+        next_emplace->size = 0;
+    }
+    next_emplace->args_handled = 0;
+    next_emplace->args_total = c->arg_count;
+}
+
+void compile_end_arg(
+    struct instruction_buffer *out,
+    struct intermediate_buffer *intermediates,
+    struct emplace_info *em,
+    struct pattern_command *c
+) {
+    if (em->type == PATTERN_ARRAY) {
+        struct intermediate val = pop_intermediate(intermediates);
+        struct intermediate *pointer_val =
+            &intermediates->data[em->pointer_intermediate_index];
+        if (em->args_handled == 0) {
+            em->size = val.type.total_size;
+
+            /* TODO: actually garbage collect this type info?? idk */
+            struct type *ty = malloc(sizeof(struct type));
+            *ty = val.type;
+            em->element_type = ty;
+            pointer_val->type.inner = ty;
+        } else {
+            /* TODO: properly compare types to make sure the elements of
+               the array all agree */
+            if (em->size != val.type.total_size) {
+                fprintf(stderr, "Error at line %d, %d: Array elements had "
+                    "different sizes.\n", c->tk.row,
+                    c->tk.column);
+                exit(EXIT_FAILURE);
+            }
+        }
+        struct instruction instr;
+        instr.op = OP_ARRAY_STORE;
+        instr.flags = OP_64BIT;
+        instr.output = pointer_val->ref;
+        instr.arg1.type = REF_CONSTANT;
+        instr.arg1.x = em->args_handled;
+        /* TODO: rearrange this whole thing to store refs in a stack, and
+           pop arg2 from that. */
+        instr.arg2 = val.ref;
+        buffer_push(*out, instr);
+    } else if (em->type == PATTERN_PROCEDURE_CALL) {
+        compile_push(out, intermediates);
+    } else {
+        fprintf(stderr, "Error at line %d, %d: Multi-value "
+            "encountered with unknown emplace type %d.\n",
+            c->tk.row, c->tk.column,
+            em->type);
+        exit(EXIT_FAILURE);
+    }
+}
+
+void compile_end_emplace(
+    struct instruction_buffer *out,
+    struct intermediate_buffer *intermediates,
+    struct emplace_info *em,
+    struct pattern_command *c
+) {
+    if (em->type == PATTERN_PROCEDURE_CALL) {
+        compile_proc_call(
+            out,
+            intermediates,
+            em->args_total
+        );
+    } else if (em->type == PATTERN_ARRAY) {
+        struct intermediate *pointer_val =
+            &intermediates->data[em->pointer_intermediate_index];
+        struct instruction *alloc_instr =
+            &out->data[em->alloc_instruction_index];
+        alloc_instr->op = OP_ARRAY_ALLOC;
+        alloc_instr->flags = 0;
+        alloc_instr->output = pointer_val->ref;
+        alloc_instr->arg1.type = REF_STATIC_POINTER;
+        alloc_instr->arg1.x = (int64)em->element_type;
+        alloc_instr->arg2.type = REF_CONSTANT;
+        alloc_instr->arg2.x = em->args_total;
+    } else if (em->type == PATTERN_STRUCT) {
+        fprintf(stderr, "Error: Struct literals are not yet "
+            "implemented.\n");
+        exit(EXIT_FAILURE);
+    } else {
+        fprintf(stderr, "Error at line %d, %d: Multi-value "
+            "encountered with unknown emplace type %d.\n",
+            c->tk.row, c->tk.column,
+            em->type);
+        exit(EXIT_FAILURE);
+    }
+}
+
 struct intermediate_buffer compile_expression(
     struct instruction_buffer *out,
     struct record_table *bindings,
-    struct rpn_buffer *in
+    struct pattern *in
 ) {
     struct intermediate_buffer intermediates = {0};
     struct emplace_stack emplace_stack = {0};
 
     for (int i = 0; i < in->count; i++) {
-        struct rpn_atom *atom = &in->data[i];
-        if (atom->type == RPN_VALUE) {
-            compile_value_token(bindings, &intermediates, &atom->tk);
-        } else if (atom->type == RPN_UNARY) {
+        struct pattern_command *c = &in->data[i];
+        if (c->type == PATTERN_VALUE) {
+            compile_value_token(bindings, &intermediates, &c->tk);
+        } else if (c->type == PATTERN_UNARY) {
             fprintf(stderr, "Error: Unary operators are not yet "
                 "implemented.\n");
             exit(EXIT_FAILURE);
-        } else if (atom->type == RPN_BINARY) {
+        } else if (c->type == PATTERN_BINARY) {
+            /* TODO: detect if this is about to be assigned to a variable, and
+               use that as the output if so. */
             compile_operation(
                 out,
                 bindings,
                 &intermediates,
-                atom->tk
+                c->tk
             );
-        } else if (atom->type != RPN_GROUPING) {
-            fprintf(stderr, "Error: Got unknown atom type in RPN "
-                "compilation?\n");
-            exit(EXIT_FAILURE);
-        } else if (atom->tk.id == '(') {
-            struct emplace_info *next_emplace = buffer_addn(emplace_stack, 1);
-
-            if (atom->is_postfix) {
-                next_emplace->alloc_instruction_index = -1;
-                next_emplace->emplace_type = EMPLACE_CALL;
+        } else if (c->type == PATTERN_END_TERM) {
+            if (emplace_stack.count != 0) {
+                fprintf(stderr, "Error: Got multivalue command in the middle "
+                    "of a function argument list, or struct/array "
+                    "literal...?\n");
+                exit(EXIT_FAILURE);
             }
-
-            next_emplace->multi_value_count = 0;
-            next_emplace->size = 0;
-        } else if (atom->tk.id == '[') {
-            struct emplace_info *next_emplace = buffer_addn(emplace_stack, 1);
-
-            if (atom->is_postfix) {
-                next_emplace->alloc_instruction_index = -1;
-                next_emplace->emplace_type = EMPLACE_INDEX;
-            } else {
-                next_emplace->alloc_instruction_index = out->count;
-                buffer_change_count(*out, 1);
-                next_emplace->emplace_type = EMPLACE_ARRAY;
-
-                /* TODO: how do I handle these array types?? What kinds of type
-                   inference am I planning on having? */
-                struct type array_type = type_array_of(type_int64);
-                struct ref array_temporary = push_intermediate(&intermediates, array_type);
-
-                next_emplace->pointer_intermediate_index = intermediates.count - 1;
-            }
-
-            next_emplace->multi_value_count = 0;
-            next_emplace->size = 0;
-        } else if (atom->tk.id == '{') {
-            fprintf(stderr, "Error: Struct literals are not yet "
-                "implemented.\n");
-            exit(EXIT_FAILURE);
-        } else if (atom->tk.id == ',') {
+            /* We are either assigning or returning this multi-value, push it
+               to the stack. */
+            /* TODO: Don't push if it is the last term in the multi-value, to
+               save one redundant move command? */
+            compile_push(out, &intermediates);
+        } else if (c->type == PATTERN_END_ARG) {
             struct emplace_info *em = buffer_top(emplace_stack);
             if (!em) {
-                fprintf(stderr, "Error at line %d, %d: Multi-values are not "
-                    "yet implemented.\n", atom->tk.row,
-                    atom->tk.column);
+                fprintf(stderr, "Error at line %d, %d: Got an END_ARG command "
+                    "outside of a function/array/struct expression?\n",
+                    c->tk.row, c->tk.column);
                 exit(EXIT_FAILURE);
             }
-            if (em->emplace_type == EMPLACE_ARRAY) {
-                struct intermediate val = pop_intermediate(&intermediates);
-                struct intermediate *pointer_val =
-                    &intermediates.data[em->pointer_intermediate_index];
-                if (em->multi_value_count == 0) {
-                    em->size = val.type.total_size;
-
-                    /* TODO: actually garbage collect this type info?? idk */
-                    struct type *ty = malloc(sizeof(struct type));
-                    *ty = val.type;
-                    em->element_type = ty;
-                    pointer_val->type.inner = ty;
-                } else {
-                    /* TODO: properly compare types to make sure the elements of
-                       the array all agree */
-                    if (em->size != val.type.total_size) {
-                        fprintf(stderr, "Error at line %d, %d: Array elements had "
-                            "different sizes.\n", atom->tk.row,
-                            atom->tk.column);
-                        exit(EXIT_FAILURE);
-                    }
-                }
-                struct instruction instr;
-                instr.op = OP_ARRAY_STORE;
-                instr.flags = OP_64BIT;
-                instr.output = pointer_val->ref;
-                instr.arg1.type = REF_CONSTANT;
-                instr.arg1.x = em->multi_value_count;
-                /* TODO: rearrange this whole thing to store refs in a stack, and
-                   pop arg2 from that. */
-                instr.arg2 = val.ref;
-                buffer_push(*out, instr);
-            } else if (em->emplace_type == EMPLACE_CALL) {
-                compile_push(out, &intermediates);
-            } else if (em->emplace_type == EMPLACE_INDEX) {
-                /* Do nothing, just leave the ref in the intermediate buffer,
-                   and look for the close bracket. */
-            } else {
-                fprintf(stderr, "Error at line %d, %d: Multi-value "
-                    "encountered with unknown emplace type %d.\n",
-                    atom->tk.row, atom->tk.column,
-                    em->emplace_type);
-                exit(EXIT_FAILURE);
+            compile_end_arg(out, &intermediates, em, c);
+            em->args_handled += 1;
+            if (em->args_handled >= em->args_total) {
+                compile_end_emplace(out, &intermediates, em, c);
+                emplace_stack.count -= 1;
             }
-            em->multi_value_count += 1;
-        } else if (atom->tk.id == ')') {
-            if (emplace_stack.count <= 0) {
-                fprintf(stderr, "Error: Tried to compile unmatched close "
-                    "paren?\n");
-                exit(EXIT_FAILURE);
-            }
-            struct emplace_info em = buffer_pop(emplace_stack);
-            if (em.emplace_type != EMPLACE_CALL) {
-                fprintf(stderr, "Error: Tried to compile close paren marker "
-                    "for something other than a function/procedure call?\n");
-                exit(EXIT_FAILURE);
-            }
-
-            /* Hacky, but we increase i manually here. Originally this whole
-               loop was a while loop driven by manual increments, before we had
-               an intermediate stack that we could just push refs onto without
-               pushing them as actual temporaries. */
-            i += 1;
-            if (in->data[i].type != RPN_BINARY || in->data[i].tk.id != '(') {
-                fprintf(stderr, "Error: Got postfix parentheses in RPN "
-                    "that weren't followed by function application?\n");
-                exit(EXIT_FAILURE);
-            }
-
-            compile_proc_call(
-                out,
-                bindings,
-                &intermediates,
-                em.multi_value_count
-            );
-        } else if (atom->tk.id == ']') {
-            if (emplace_stack.count <= 0) {
-                fprintf(stderr, "Error: Tried to compile unmatched close "
-                    "bracket?\n");
-                exit(EXIT_FAILURE);
-            }
-            struct emplace_info em = buffer_pop(emplace_stack);
-
-            if (em.emplace_type == EMPLACE_ARRAY) {
-                struct intermediate *pointer_val =
-                    &intermediates.data[em.pointer_intermediate_index];
-                struct instruction *alloc_instr =
-                    &out->data[em.alloc_instruction_index];
-                alloc_instr->op = OP_ARRAY_ALLOC;
-                alloc_instr->flags = 0;
-                alloc_instr->output = pointer_val->ref;
-                alloc_instr->arg1.type = REF_STATIC_POINTER;
-                alloc_instr->arg1.x = (int64)em.element_type;
-                alloc_instr->arg2.type = REF_CONSTANT;
-                alloc_instr->arg2.x = em.multi_value_count;
-            } else if (em.emplace_type == EMPLACE_INDEX) {
-                if (em.multi_value_count != 1) {
-                    fprintf(stderr, "Error at line %d, %d: Array index "
-                        "operations must be a single index.\n",
-                        atom->tk.row, atom->tk.column);
-                    exit(EXIT_FAILURE);
-                }
-
-                /* Don't actually do anything. The comma operators have been
-                   pushing to the stack, and there was only one thing pushed,
-                   so now we can just continue as if this were setting up for a
-                   normal stack-based binary operation. */
-            }
-        } else if (atom->tk.id == '}') {
-            fprintf(stderr, "Error: Struct literals are not yet "
-                "implemented.\n");
-            exit(EXIT_FAILURE);
         } else {
-            fprintf(stderr, "Error at line %d, %d: Unknown/unimplemented "
-                "grouping token '", atom->tk.row, atom->tk.column);
-            fputstr(atom->tk.it, stderr);
-            fprintf(stderr, "'\n");
-            exit(EXIT_FAILURE);
+            /* Some kind of opening operation, push it to the emplace stack. */
+            compile_begin_emplace(out, &intermediates, &emplace_stack, c);
         }
     }
 
@@ -677,7 +669,7 @@ struct intermediate_buffer compile_expression(
 void assert_match_pattern(
     struct instruction_buffer *out,
     struct record_table *bindings,
-    struct rpn_buffer *pattern,
+    struct pattern *pattern,
     struct intermediate_buffer *values,
     bool global
 ) {
@@ -691,20 +683,20 @@ void assert_match_pattern(
             exit(EXIT_FAILURE);
         }
 
-        struct rpn_atom *name = buffer_top(*pattern);
-        if (name->type != RPN_VALUE) {
+        struct pattern_command *c = buffer_top(*pattern);
+        if (c->type != PATTERN_VALUE) {
             fprintf(stderr, "Error at line %d, %d: The operator \"",
-                name->tk.row, name->tk.column);
-            fputstr(name->tk.it, stderr);
+                c->tk.row, c->tk.column);
+            fputstr(c->tk.it, stderr);
             fprintf(stderr, "\" appeared on the left hand side of an "
                 "assignment statement. Pattern matching is not "
                 "implemented.\n");
             exit(EXIT_FAILURE);
         }
-        if (name->tk.id != TOKEN_ALPHANUM) {
+        if (c->tk.id != TOKEN_ALPHANUM) {
             fprintf(stderr, "Error at line %d, %d: The literal \"",
-                name->tk.row, name->tk.column);
-            fputstr(name->tk.it, stderr);
+                c->tk.row, c->tk.column);
+            fputstr(c->tk.it, stderr);
             fprintf(stderr, "\" appeared on the left hand side of an "
                 "assignment statement. Pattern matching is not "
                 "implemented.\n");
@@ -712,7 +704,7 @@ void assert_match_pattern(
         }
 
         struct record_entry *new = buffer_addn(*bindings, 1);
-        new->name = name->tk.it;
+        new->name = c->tk.it;
         struct intermediate val = buffer_pop(*values);
         new->type = val.type;
 

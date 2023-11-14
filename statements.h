@@ -23,7 +23,7 @@ void parse_statement(
             exit(EXIT_FAILURE);
         }
 
-        struct expr_parse_result lhs = parse_expression(tokenizer, end_on_eol);
+        struct pattern lhs = parse_expression(tokenizer, end_on_eol);
 
         tk = get_token(tokenizer);
         if (tk.id != ';') {
@@ -37,10 +37,10 @@ void parse_statement(
         struct intermediate_buffer intermediates = compile_expression(
             out,
             bindings,
-            &lhs.atoms
+            &lhs
         );
 
-        buffer_free(lhs.atoms);
+        buffer_free(lhs);
 
         type_check_return(return_signature, &intermediates, proc_name);
 
@@ -50,26 +50,21 @@ void parse_statement(
     } else {
         put_token_back(tokenizer, tk);
 
-        struct expr_parse_result lhs = parse_expression(tokenizer, end_on_eol);
+        struct pattern lhs = parse_expression(tokenizer, end_on_eol);
 
         tk = get_token(tokenizer);
         if (tk.id == ';') {
             struct intermediate_buffer intermediates = compile_expression(
                 out,
                 bindings,
-                &lhs.atoms
+                &lhs
             );
 
             /* TODO: pop the intermediates somehow??? */
-            buffer_free(lhs.atoms);
+            buffer_free(lhs);
             buffer_free(intermediates);
         } else if (tk.id == TOKEN_DEFINE) {
-            if (lhs.has_ref_decl) {
-                fprintf(stderr, "Error: \'ref\' is not yet supported.\n");
-                exit(EXIT_FAILURE);
-            }
-
-            struct expr_parse_result rhs = parse_expression(tokenizer, false);
+            struct pattern rhs = parse_expression(tokenizer, false);
 
             tk = get_token(tokenizer);
             if (tk.id != ';') {
@@ -85,13 +80,13 @@ void parse_statement(
             struct intermediate_buffer intermediates = compile_expression(
                 out,
                 bindings,
-                &rhs.atoms
+                &rhs
             );
-            buffer_free(rhs.atoms);
+            buffer_free(rhs);
 
-            assert_match_pattern(out, bindings, &lhs.atoms, &intermediates, global);
+            assert_match_pattern(out, bindings, &lhs, &intermediates, global);
 
-            buffer_free(lhs.atoms);
+            buffer_free(lhs);
             buffer_free(intermediates);
         } else if (tk.id == '=') {
             fprintf(stderr, "Error: Ref assignment not yet implemented.\n");
@@ -229,7 +224,7 @@ struct record_entry parse_procedure(
     }
 
     if (tk.id == TOKEN_DEFINE) {
-        struct expr_parse_result lhs = parse_expression(tokenizer, false);
+        struct pattern lhs = parse_expression(tokenizer, false);
 
         struct token tk = get_token(tokenizer);
         if (tk.id != ';') {
@@ -243,10 +238,10 @@ struct record_entry parse_procedure(
         struct intermediate_buffer intermediates = compile_expression(
             out,
             bindings,
-            &lhs.atoms
+            &lhs
         );
 
-        buffer_free(lhs.atoms);
+        buffer_free(lhs);
 
         compile_return(out, &intermediates);
         /* TODO: Unify these outputs */

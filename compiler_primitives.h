@@ -164,15 +164,6 @@ void compile_push(
     }
 }
 
-/* Really more of an expression concept than an operator concept, but this
-   represents an argument to an operation that can either be a temporary, or an
-   explicit token. */
-struct rpn_ref {
-    /* Could use TOKEN_NULL instead of this flag. */
-    bool push;
-    struct token tk;
-};
-
 void compile_operation(
     struct instruction_buffer *out,
     struct record_table *bindings,
@@ -274,7 +265,6 @@ void compile_operation(
 
 void compile_proc_call(
     struct instruction_buffer *out,
-    struct record_table *bindings,
     struct intermediate_buffer *intermediates,
     int arg_count
 ) {
