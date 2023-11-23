@@ -130,6 +130,26 @@ void copy_vals(struct type *element_type, void *dest, void *source, int count) {
     }
 }
 
+void copy_scalar(uint8 *dest, uint8 *src, enum operation_flags flags) {
+    if (flags == OP_SHARED_BUFF) {
+        struct shared_buff *src_buff = (struct shared_buff*)src;
+        struct shared_buff *dest_buff = (struct shared_buff*)dest;
+        *dest_buff = *src_buff;
+        if (src_buff->ptr != NULL) {
+            src_buff->ptr->references += 1;
+            if (debug) {
+                print_ref_count(src_buff->ptr);
+                printf("count is %d\n", src_buff->count);
+            }
+        }
+    } else {
+        int64 *src64 = (int64*)src;
+        int64 *dest64 = (int64*)dest;
+        *dest64 = *src64;
+    }
+}
+
+
 /**********************/
 /* Runtime Call Stack */
 /**********************/
@@ -171,6 +191,11 @@ enum variable_memory_mode {
     VARIABLE_REFCOUNT /* Decrement this variable's reference count, and free it
                          if the count is zero. */
 };
+
+enum variable_memory_mode scalar_mem_mode(enum operation_flags flags) {
+    if (flags == OP_SHARED_BUFF) return VARIABLE_REFCOUNT;
+    /* else */ return VARIABLE_DIRECT_VALUE;
+}
 
 struct variable_data {
     union variable_contents value;
@@ -339,22 +364,8 @@ void continue_execution(
         case OP_NULL:
             break;
         case OP_MOV:
-            result = arg1_full;
-            if (next->flags == OP_SHARED_BUFF) {
-                result_mode = VARIABLE_REFCOUNT;
-                if (result.shared_buff.ptr != NULL) {
-                    if (arg1_mode != VARIABLE_REFCOUNT) {
-                        fprintf(stderr, "Error: Tried to move an array but "
-                            "the arg was not an array?\n");
-                        exit(EXIT_FAILURE);
-                    }
-                    result.shared_buff.ptr->references += 1;
-                    if (debug) {
-                        print_ref_count(result.shared_buff.ptr);
-                        printf("count is %d\n", result.shared_buff.count);
-                    }
-                }
-            }
+            copy_scalar(result.bytes, arg1_full.bytes, next->flags);
+            result_mode = scalar_mem_mode(next->flags);
             break;
         case OP_LOR:
             result.val64 = arg1 || arg2;
@@ -501,7 +512,7 @@ void continue_execution(
                and aligned part of the buffer. */
             uint8 *data = shared_buff_get_index(output.shared_buff, arg1);
             struct type *element_type = output.shared_buff.ptr->element_type;
-            copy_vals(element_type, data, arg2_full.bytes, 1);
+            copy_scalar(data, arg2_full.bytes, next->flags);
             /* Stop the array variable from being overwritten. */
             output_ref.type = REF_NULL;
             break;
@@ -516,7 +527,8 @@ void continue_execution(
                 fprintf(stderr, "Error: Arrays of structs are not implemented.\n");
                 exit(EXIT_FAILURE);
             }
-            copy_vals(element_type, result.bytes, data, 1);
+            copy_scalar(result.bytes, data, next->flags);
+            result_mode = scalar_mem_mode(next->flags);
             if (element_type->connective == TYPE_ARRAY) {
                 result_mode = VARIABLE_REFCOUNT;
             } else if (element_type->connective != TYPE_INT) {
@@ -565,13 +577,7 @@ void continue_execution(
             /* TODO: check that the memory accessed is actually an initialised
                and aligned part of the buffer. */
             void *data = output.pointer + arg1;
-            if (next->flags == OP_SHARED_BUFF) {
-                struct shared_buff *out = data;
-                *out = arg2_full.shared_buff;
-            } else {
-                int64 *out = data;
-                *out = arg2;
-            }
+            copy_scalar(data, arg2_full.bytes, next->flags);
             /* Stop the struct variable from being overwritten. */
             output_ref.type = REF_NULL;
             break;
