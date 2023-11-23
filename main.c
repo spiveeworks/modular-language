@@ -35,39 +35,6 @@ void print_ref(struct ref ref) {
     }
 }
 
-void print_array(struct shared_buff buff) {
-    printf("[");
-    if (buff.ptr) {
-        struct type *element_type = buff.ptr->element_type;
-        switch (element_type->connective) {
-        case TYPE_INT:
-          {
-            int64 *arr = shared_buff_get_index(buff, 0);
-            for (int i = 0; i < buff.count; i++) {
-                if (i > 0) printf(", ");
-                printf("%lld", (long long)arr[i]);
-            }
-            break;
-          }
-        case TYPE_ARRAY:
-          {
-            struct shared_buff *arr = shared_buff_get_index(buff, 0);
-            for (int i = 0; i < buff.count; i++) {
-                if (i > 0) printf(", ");
-                print_array(arr[i]);
-            }
-            break;
-          }
-        default:
-            for (int i = 0; i < buff.count; i++) {
-                if (i > 0) printf(", ");
-                printf("?");
-            }
-        }
-    }
-    printf("]");
-}
-
 void disassemble_instructions(struct instruction_buffer instructions) {
     for (int i = 0; i < instructions.count; i++) {
         struct instruction *instr = &instructions.data[i];
@@ -101,16 +68,52 @@ void disassemble_instructions(struct instruction_buffer instructions) {
     }
 }
 
-void print_call_stack_value(struct variable_data *it) {
-    if (it->mem_mode == VARIABLE_REFCOUNT) {
-        print_array(it->value.shared_buff);
-    } else {
-        printf("%lld", (long long)it->value.val64);
+void print_data(uint8 *it, struct type *type) {
+    if (type->connective == TYPE_ARRAY) {
+        struct shared_buff *buff = (struct shared_buff*)it;
+        struct type *element_type = type->inner;
+        printf("[");
+        if (buff->count > 0) {
+            uint8 *data = shared_buff_get_index(*buff, 0);
+            for (int i = 0; i < buff->count; i++) {
+                if (i > 0) printf(", ");
+
+                print_data(data, element_type);
+
+                data += element_type->total_size;
+            }
+        }
+        printf("]");
+    } else if (type->connective == TYPE_INT) {
+        int64 *as_int = (int64*)it;
+        printf("%lld", *as_int);
+    } else if (type->connective == TYPE_TUPLE) {
+        printf("{");
+        for (int i = 0; i < type->elements.count; i++) {
+            if (i > 0) printf(", ");
+            struct type *elem_ty = &type->elements.data[i];
+            print_data(it, elem_ty);
+            it += elem_ty->total_size;
+        }
+        printf("}");
     }
 }
 
+void print_call_stack_value(union variable_contents it, struct type *type) {
+    if (type->connective == TYPE_TUPLE || type->connective == TYPE_RECORD) {
+        print_data(it.pointer, type);
+    } else {
+        print_data(it.bytes, type);
+    }
+}
+
+struct statement {
+    struct instruction_buffer instructions;
+    struct intermediate_buffer intermediates;
+};
+
 struct statement_buffer {
-    struct instruction_buffer *data;
+    struct statement *data;
     size_t count;
     size_t capacity;
 };
@@ -174,7 +177,10 @@ int main(int argc, char **argv) {
         struct item item = parse_item(&tokenizer, &bindings, repl);
 
         if (item.type == ITEM_STATEMENT) {
-            buffer_push(statements, item.instructions);
+            struct statement statement;
+            statement.instructions = item.instructions;
+            statement.intermediates = item.intermediates;
+            buffer_push(statements, statement);
 
             if (debug) {
                 printf("\nStatement parsed. Output:\n");
@@ -207,13 +213,19 @@ int main(int argc, char **argv) {
         int prev_global_count = call_stack.vars.global_count;
 
         if (debug) printf("\nExecuting.\n");
+        struct intermediate_buffer results = {0};
         for (int i = 0; i < statements.count; i++) {
-            execute_top_level_code(procedures, &call_stack, &statements.data[i]);
-
+            struct statement *it = &statements.data[i];
+            execute_top_level_code(procedures, &call_stack, &it->instructions);
             /* TODO: Check vars.global_count after each statement? */
 
             /* Top level statements are fired once and then forgotten. */
-            buffer_free(statements.data[i]);
+            buffer_free(it->instructions);
+
+            /* Overwrite results with this statement. At the end of the loop we
+               will be left with the last statement's results. */
+            buffer_free(results);
+            results = it->intermediates;
         }
         /* Empty the statement buffer, and reuse it next loop. */
         statements.count = 0;
@@ -233,27 +245,34 @@ int main(int argc, char **argv) {
         for (int i = prev_global_count; i < call_stack.vars.global_count; i++) {
             fputstr(bindings.data[i].name, stdout);
             printf(" = ");
-            print_call_stack_value(&call_stack.vars.data[i]);
+            print_call_stack_value(call_stack.vars.data[i].value, &bindings.data[i].type);
             printf("\n");
         }
 
-        if (repl) {
+        if (repl && results.count > 0) {
             /* If the last statement in this line was a bare expression, print
                its results. */
-            size_t start = call_stack.vars.global_count;
-            size_t end = call_stack.vars.count;
-            if (start < end) {
-                printf("result = ");
-                for (size_t i = start; i < end; i++) {
-                    if (i > start) printf(", ");
+            printf("result = ");
+            for (int i = 0; i< results.count; i++) {
+                if (i > 0) printf(", ");
 
-                    struct variable_data *it = &call_stack.vars.data[i];
-
-                    print_call_stack_value(it);
-                }
-                printf("\n");
+                struct intermediate *it = &results.data[i];
+                /* Kinda hacky, just reuse the interpreter's read_ref function,
+                   but with a bogus execution frame representing the fact that
+                   there are no local variables. */
+                struct execution_frame frame = {.locals_count = call_stack.vars.global_count};
+                union variable_contents val = read_ref(
+                    &frame,
+                    &call_stack.vars,
+                    it->ref,
+                    NULL
+                );
+                print_call_stack_value(val, &it->type);
             }
+            printf("\n");
         }
+
+        buffer_free(results);
         unbind_temporaries(&call_stack.vars);
 
         if (repl) printf("> ");

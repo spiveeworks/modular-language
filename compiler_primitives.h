@@ -130,6 +130,8 @@ void compile_mov(
         flags = OP_64BIT;
     } else if (ty->connective == TYPE_ARRAY) {
         flags = OP_SHARED_BUFF;
+    } else if (ty->connective == TYPE_TUPLE || ty->connective == TYPE_RECORD) {
+        flags = OP_64BIT;
     } else {
         fprintf(stderr, "Error: Move instructions are only "
             "implemented for arrays and 64 bit integers.\n");
@@ -142,6 +144,88 @@ void compile_mov(
     instr->output = to;
     instr->arg1 = from;
     instr->arg2.type = REF_NULL;
+}
+
+/* When we write a struct to a location, we then need to increment some of the
+   reference counts in that struct. This function will statically generate the
+   instructions required to do that. */
+void compile_struct_increment(
+    struct instruction_buffer *out,
+    struct ref val,
+    struct type *element_type
+) {
+    fprintf(stderr, "Warning: copying complex structs is not yet "
+        "implemented.\n");
+}
+
+struct type compile_store(
+    struct instruction_buffer *out,
+    struct ref to_ptr,
+    int64 offset,
+    struct intermediate_buffer *intermediates
+) {
+    /* Don't pop yet, in case we need to make some more temporaries first. */
+    struct intermediate val = *buffer_top(*intermediates);
+
+    enum operation_flags flags = 0;
+    if (val.type.connective == TYPE_INT && val.type.word_size == 3) {
+        struct instruction *instr = buffer_addn(*out, 1);
+        instr->op = OP_POINTER_STORE;
+        instr->flags = OP_64BIT;
+        instr->output = to_ptr;
+        instr->arg1.type = REF_CONSTANT;
+        instr->arg1.x = offset;
+        instr->arg2 = val.ref;
+    } else if (val.type.connective == TYPE_ARRAY) {
+        struct instruction *instr = buffer_addn(*out, 1);
+        instr->op = OP_POINTER_STORE;
+        instr->flags = OP_SHARED_BUFF;
+        instr->output = to_ptr;
+        instr->arg1.type = REF_CONSTANT;
+        instr->arg1.x = offset;
+        instr->arg2 = val.ref;
+    } else if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
+        /* First compile the reference count increments, if any. */
+        if (val.ref.type != REF_TEMPORARY) {
+            /* If val is a temporary, then we can discard the old memory. If it
+               is not a temporary, then we can use the pointer multiple times
+               to increment all the arrays inside it, without the pointer
+               getting discarded. */
+            compile_struct_increment(out, val.ref, &val.type);
+        }
+
+        /* Now compile the actual copy operation. */
+        struct instruction *instrs = buffer_addn(*out, 2);
+
+        /* TODO: If offset is 0 then we should write directly to the pointer,
+           but without discarding it, even though it is temporary... Requires
+           actual flags for dealing with temporaries though, instead of what we
+           are doing now. */
+        /* We immediately use our own temporary, so we don't need to add
+           anything to the intermediates buffer. */
+        struct ref offset_ptr = {REF_TEMPORARY};
+        offset_ptr.x = intermediates->temporaries_count;
+        instrs[0].op = OP_POINTER_OFFSET;
+        instrs[0].output = offset_ptr;
+        instrs[0].arg1 = to_ptr;
+        instrs[0].arg2.type = REF_CONSTANT;
+        instrs[0].arg2.x = offset;
+
+        instrs[1].op = OP_POINTER_COPY;
+        instrs[1].output = offset_ptr;
+        instrs[1].arg1 = val.ref;
+        instrs[1].arg2.type = REF_CONSTANT;
+        instrs[1].arg2.x = val.type.total_size;
+    } else {
+        fprintf(stderr, "Error: Store instructions are only "
+            "implemented for arrays and 64 bit integers.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    /* Pop AFTER storing, in case we needed to contrive a temporary pointer
+       value. */
+    pop_intermediate(intermediates);
+    return val.type;
 }
 
 /* Push the top intermediate value onto the stack, if it isn't already on the
@@ -216,7 +300,16 @@ void compile_operation(
                     "implemented.\n");
             exit(EXIT_FAILURE);
         }
-        result.flags = OP_64BIT;
+        struct type *inner = val1.type.inner;
+        if (inner->connective == TYPE_ARRAY) {
+            result.flags = OP_SHARED_BUFF;
+        } else if (inner->connective == TYPE_INT) {
+            result.flags = OP_64BIT;
+        } else {
+            fprintf(stderr, "Error: Currently only arrays of integers or "
+                "other arrays can be indexed.\n");
+            exit(EXIT_FAILURE);
+        }
 
         result_type = *val1.type.inner;
     } else if (op->opcode == OP_ARRAY_CONCAT) {

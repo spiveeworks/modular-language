@@ -101,9 +101,7 @@ enum partial_operation_type {
     PARTIAL_INDEX,
     PARTIAL_PROCEDURE_CALL,
     PARTIAL_ARRAY,
-    /*
     PARTIAL_STRUCT,
-    */
 };
 
 /* A pattern_command that is still accumulating inputs. */
@@ -186,7 +184,7 @@ void read_next_ref(
         buffer_push(stack->lhs, new);
         stack->grouping_count += 1;
     } else if (tk.id == '[') {
-        /* Nothing to cascade, just push the paren and continue. */
+        /* Nothing to cascade, just push the bracket and continue. */
         struct partial_operation new = {PARTIAL_ARRAY, PRECEDENCE_GROUPING};
         new.op = tk; /* For errors, I guess. */
         new.open_command_index = out->count;
@@ -200,9 +198,19 @@ void read_next_ref(
            allocate memory up front. */
         buffer_push(*out, command);
     } else if (tk.id == '{') {
-        fprintf(stderr, "Error at line %d, %d: Struct literals are not yet "
-            "implemented.\n", tk.row, tk.column);
-        exit(EXIT_FAILURE);
+        /* Nothing to cascade, just push the brace and continue. */
+        struct partial_operation new = {PARTIAL_STRUCT, PRECEDENCE_GROUPING};
+        new.op = tk; /* For errors, I guess. */
+        new.open_command_index = out->count;
+        buffer_push(stack->lhs, new);
+        stack->grouping_count += 1;
+
+        struct pattern_command command = {PATTERN_STRUCT};
+        command.tk = tk;
+        /* for '[' and '{' we actually want to store a command in the buffer
+           straight away, so that the compiler can make an instruction to
+           allocate memory up front. */
+        buffer_push(*out, command);
     } else {
         /* We MUST get a ref if we are at the start of an expression, or if we
            just got an infix operator. Anything else is therefore an error. */
@@ -507,9 +515,13 @@ void compile_begin_emplace(
 
         next_emplace->pointer_intermediate_index = intermediates->count - 1;
     } else if (c->type == PATTERN_STRUCT) {
-        fprintf(stderr, "Error: Struct literals are not yet "
-            "implemented.\n");
-        exit(EXIT_FAILURE);
+        next_emplace->alloc_instruction_index = out->count;
+        buffer_change_count(*out, 1);
+        next_emplace->size = 0;
+
+        struct ref array_temporary = push_intermediate(intermediates, type_empty_tuple);
+
+        next_emplace->pointer_intermediate_index = intermediates->count - 1;
     } else {
         next_emplace->alloc_instruction_index = -1;
         next_emplace->size = 0;
@@ -525,7 +537,7 @@ void compile_end_arg(
     struct pattern_command *c
 ) {
     if (em->type == PATTERN_ARRAY) {
-        struct intermediate val = pop_intermediate(intermediates);
+        struct intermediate val = *buffer_top(*intermediates);
         struct intermediate *pointer_val =
             &intermediates->data[em->pointer_intermediate_index];
         if (em->args_handled == 0) {
@@ -546,18 +558,76 @@ void compile_end_arg(
                 exit(EXIT_FAILURE);
             }
         }
-        struct instruction instr;
-        instr.op = OP_ARRAY_STORE;
-        instr.flags = OP_64BIT;
-        instr.output = pointer_val->ref;
-        instr.arg1.type = REF_CONSTANT;
-        instr.arg1.x = em->args_handled;
-        /* TODO: rearrange this whole thing to store refs in a stack, and
-           pop arg2 from that. */
-        instr.arg2 = val.ref;
-        buffer_push(*out, instr);
+        if (val.type.connective == TYPE_INT) {
+            struct instruction instr;
+            instr.op = OP_ARRAY_STORE;
+            instr.flags = OP_64BIT;
+            instr.output = pointer_val->ref;
+            instr.arg1.type = REF_CONSTANT;
+            instr.arg1.x = em->args_handled;
+            instr.arg2 = val.ref;
+            buffer_push(*out, instr);
+        } else if (val.type.connective == TYPE_ARRAY) {
+            struct instruction instr;
+            instr.op = OP_ARRAY_STORE;
+            instr.flags = OP_SHARED_BUFF;
+            instr.output = pointer_val->ref;
+            instr.arg1.type = REF_CONSTANT;
+            instr.arg1.x = em->args_handled;
+            instr.arg2 = val.ref;
+            buffer_push(*out, instr);
+        } else if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
+            /* First compile the reference count increments, if any. */
+            if (val.ref.type != REF_TEMPORARY) {
+                /* If val is a temporary, then we can discard the old memory.
+                   If it is not a temporary, then we can use the pointer
+                   multiple times to increment all the arrays inside it,
+                   without the pointer getting discarded. */
+                compile_struct_increment(out, val.ref, &val.type);
+            }
+
+            /* Next compile the actual copy operation. */
+            struct instruction *instrs = buffer_addn(*out, 2);
+
+            /* We immediately use our own temporary, so we don't need to add
+               anything to the intermediates buffer. */
+            struct ref offset_ptr = {REF_TEMPORARY};
+            offset_ptr.x = intermediates->temporaries_count;
+            instrs[0].op = OP_ARRAY_OFFSET;
+            instrs[0].output = offset_ptr;
+            instrs[0].arg1 = pointer_val->ref;
+            instrs[0].arg2.type = REF_CONSTANT;
+            instrs[0].arg2.x = em->args_handled;
+
+            instrs[1].op = OP_POINTER_COPY;
+            instrs[1].output = offset_ptr;
+            instrs[1].arg1 = val.ref;
+            instrs[1].arg2.type = REF_CONSTANT;
+            instrs[1].arg2.x = val.type.total_size;
+        }
+        /* Pop after, now that we have finished making and using our own
+           temporaries. */
+        pop_intermediate(intermediates);
     } else if (em->type == PATTERN_PROCEDURE_CALL) {
         compile_push(out, intermediates);
+    } else if (em->type == PATTERN_STRUCT) {
+        struct intermediate *pointer_val =
+            &intermediates->data[em->pointer_intermediate_index];
+        if (pointer_val->type.connective == TYPE_RECORD) {
+            fprintf(stderr, "Error: Got bare tuple element in a record type.\n");
+            exit(EXIT_FAILURE);
+        }
+        if (pointer_val->type.connective != TYPE_TUPLE) {
+            fprintf(stderr, "Error: Tried compiling tuple emplace command to "
+                "an output that wasn't a tuple?\n");
+            exit(EXIT_FAILURE);
+        }
+
+        size_t offset = pointer_val->type.total_size;
+        struct type val_type = compile_store(out, pointer_val->ref, offset, intermediates);
+
+        pointer_val->type.total_size += val_type.total_size;
+        buffer_push(pointer_val->type.elements, val_type);
     } else {
         fprintf(stderr, "Error at line %d, %d: Multi-value "
             "encountered with unknown emplace type %d.\n",
@@ -592,9 +662,17 @@ void compile_end_emplace(
         alloc_instr->arg2.type = REF_CONSTANT;
         alloc_instr->arg2.x = em->args_total;
     } else if (em->type == PATTERN_STRUCT) {
-        fprintf(stderr, "Error: Struct literals are not yet "
-            "implemented.\n");
-        exit(EXIT_FAILURE);
+        struct intermediate *pointer_val =
+            &intermediates->data[em->pointer_intermediate_index];
+        struct instruction *alloc_instr =
+            &out->data[em->alloc_instruction_index];
+        alloc_instr->op = OP_STACK_ALLOC;
+        alloc_instr->flags = 0;
+        alloc_instr->output = pointer_val->ref;
+        alloc_instr->arg1.type = REF_CONSTANT;
+        alloc_instr->arg1.x = (int64)pointer_val->type.total_size;
+        alloc_instr->arg2.type = REF_NULL;
+        alloc_instr->arg2.x = 0;
     } else {
         fprintf(stderr, "Error at line %d, %d: Multi-value "
             "encountered with unknown emplace type %d.\n",

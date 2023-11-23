@@ -160,6 +160,7 @@ struct type {
     enum type_connective connective;
     union {
         uint8 word_size; /* 0 => 8 bits, up to 3 => 64 bits */
+        struct type_buffer elements;
         struct record_table fields;
         struct type *inner;
         struct proc_signature proc;
@@ -176,6 +177,11 @@ const struct type type_int64 = {
     .connective = TYPE_INT,
     .word_size = 3,
     .total_size = 8
+};
+
+const struct type type_empty_tuple = {
+    .connective = TYPE_TUPLE,
+    .total_size = 0
 };
 
 /* TODO: work out a memory arena or reference counting or something to make
@@ -303,9 +309,17 @@ enum operation {
     OP_RET,
 
     OP_ARRAY_ALLOC,
+    OP_ARRAY_OFFSET,
     OP_ARRAY_STORE,
     OP_ARRAY_INDEX,
     OP_ARRAY_CONCAT,
+
+    /* Pointer operations, for manipulating tuples and records. */
+    OP_STACK_ALLOC,
+    OP_POINTER_OFFSET, /* Like add, but don't discard arg1. */
+    OP_POINTER_STORE,
+    OP_POINTER_COPY,
+    OP_POINTER_LOAD,
 };
 
 enum operation_flags {

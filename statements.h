@@ -6,7 +6,7 @@
 #include "tokenizer.h"
 #include "expressions.h"
 
-void parse_statement(
+struct intermediate_buffer parse_statement(
     struct instruction_buffer *out,
     struct tokenizer *tokenizer,
     struct record_table *bindings,
@@ -60,9 +60,9 @@ void parse_statement(
                 &lhs
             );
 
-            /* TODO: pop the intermediates somehow??? */
             buffer_free(lhs);
-            buffer_free(intermediates);
+
+            return intermediates;
         } else if (tk.id == TOKEN_DEFINE) {
             struct pattern rhs = parse_expression(tokenizer, false);
 
@@ -99,6 +99,9 @@ void parse_statement(
             exit(EXIT_FAILURE);
         }
     }
+
+    /* Returned or assigned results or something, return nothing. */
+    return (struct intermediate_buffer){0};
 }
 
 /**************/
@@ -261,7 +264,13 @@ struct record_entry parse_procedure(
             /* else */
 
             put_token_back(tokenizer, tk);
-            parse_statement(out, tokenizer, bindings, false, false, &output_types, proc_name);
+            struct intermediate_buffer intermediates =
+                parse_statement(out, tokenizer, bindings, false, false, &output_types, proc_name);
+            if (intermediates.count > 0) {
+                fprintf(stderr, "Warning: Intermediates may not have been "
+                    "discared properly.\n");
+            }
+            buffer_free(intermediates);
         }
     } else {
         fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
@@ -293,6 +302,7 @@ struct item {
     enum item_type type;
     struct instruction_buffer instructions;
     struct record_entry proc_binding;
+    struct intermediate_buffer intermediates;
 };
 
 struct item parse_item(
@@ -313,10 +323,19 @@ struct item parse_item(
     } else {
         struct instruction_buffer out = {0};
         put_token_back(tokenizer, tk);
-        parse_statement(&out, tokenizer, bindings, true, repl, NULL, (str){NULL, 0});
+        struct intermediate_buffer intermediates = parse_statement(
+            &out,
+            tokenizer,
+            bindings,
+            true,
+            repl,
+            NULL,
+            (str){NULL, 0}
+        );
 
         result.type = ITEM_STATEMENT;
         result.instructions = out;
+        result.intermediates = intermediates;
     }
 
     return result;

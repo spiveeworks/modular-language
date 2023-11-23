@@ -157,7 +157,7 @@ struct execution_stack {
 
 union variable_contents {
     uint64 val64;
-    void *pointer;
+    uint8 *pointer;
     uint8 bytes[16];
     struct shared_buff shared_buff;
 };
@@ -334,6 +334,7 @@ void continue_execution(
         union variable_contents result = {0};
         enum variable_memory_mode result_mode = VARIABLE_DIRECT_VALUE;
         struct ref output_ref = next->output;
+        bool discard_arg1 = next->arg1.type == REF_TEMPORARY;
         switch (next->op) {
         case OP_NULL:
             break;
@@ -447,6 +448,8 @@ void continue_execution(
                     + next->arg1.x;
                 unbind_variable(&stack->vars, index);
                 new.results_start = new.locals_start - 1;
+                /* Don't discard it, it's already discarded! */
+                discard_arg1 = false;
             } else {
                 new.results_start = new.locals_start;
             }
@@ -482,14 +485,18 @@ void continue_execution(
             break;
         }
         case OP_ARRAY_ALLOC:
-            result.shared_buff = shared_buff_alloc(arg1_full.pointer, arg2);
+            result.shared_buff = shared_buff_alloc((struct type *)arg1_full.pointer, arg2);
             result_mode = VARIABLE_REFCOUNT;
+            break;
+        case OP_ARRAY_OFFSET:
+            result.pointer = shared_buff_get_index(arg1_full.shared_buff, arg2);
+            discard_arg1 = false;
             break;
         case OP_ARRAY_STORE:
           {
             /* TODO: check that the 'output' array is a shared_buff. */
             union variable_contents output =
-                read_ref(frame, &stack->vars, next->output, NULL);
+                read_ref(frame, &stack->vars, output_ref, NULL);
             /* TODO: check that the memory accessed is actually an initialised
                and aligned part of the buffer. */
             uint8 *data = shared_buff_get_index(output.shared_buff, arg1);
@@ -542,13 +549,61 @@ void continue_execution(
 
             break;
           }
+        case OP_STACK_ALLOC:
+            fprintf(stderr, "Warning: Data stack unimplemented. Using malloc.\n");
+            result.pointer = malloc(arg1);
+            break;
+        case OP_POINTER_OFFSET:
+            result.pointer = arg1_full.pointer + arg2;
+            discard_arg1 = false;
+            break;
+        case OP_POINTER_STORE:
+          {
+            /* TODO: check that the 'output' array is a shared_buff. */
+            union variable_contents output =
+                read_ref(frame, &stack->vars, output_ref, NULL);
+            /* TODO: check that the memory accessed is actually an initialised
+               and aligned part of the buffer. */
+            void *data = output.pointer + arg1;
+            if (next->flags == OP_SHARED_BUFF) {
+                struct shared_buff *out = data;
+                *out = arg2_full.shared_buff;
+            } else {
+                int64 *out = data;
+                *out = arg2;
+            }
+            /* Stop the struct variable from being overwritten. */
+            output_ref.type = REF_NULL;
+            break;
+          }
+        case OP_POINTER_COPY:
+          {
+            union variable_contents output =
+                read_ref(frame, &stack->vars, output_ref, NULL);
+            memcpy(output.pointer, arg1_full.pointer, arg2);
+            /* Stop the struct variable from being overwritten. */
+            output_ref.type = REF_NULL;
+            break;
+          }
+        case OP_POINTER_LOAD:
+          {
+            void *data = arg1_full.pointer + arg2;
+            if (next->flags == OP_SHARED_BUFF) {
+                struct shared_buff *in = data;
+                result.shared_buff = *in;
+            } else {
+                int64 *in = data;
+                result.val64 = *in;
+            }
+            break;
+          }
         default:
             fprintf(stderr, "Error: Tried to execute unknown opcode %d.\n",
                 next->op);
             exit(EXIT_FAILURE);
         }
 
-        if (next->arg1.type == REF_TEMPORARY && next->op != OP_CALL) {
+        if (discard_arg1) {
             unbind_variable(
                 &stack->vars,
                 frame->locals_start + frame->locals_count + next->arg1.x
