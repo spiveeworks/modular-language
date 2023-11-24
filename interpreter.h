@@ -564,6 +564,7 @@ void continue_execution(
         case OP_STACK_ALLOC:
             fprintf(stderr, "Warning: Data stack unimplemented. Using malloc.\n");
             result.pointer = malloc(arg1);
+            result_mode = VARIABLE_MEMORY_STACK;
             break;
         case OP_POINTER_OFFSET:
             result.pointer = arg1_full.pointer + arg2;
@@ -594,14 +595,29 @@ void continue_execution(
         case OP_POINTER_LOAD:
           {
             void *data = arg1_full.pointer + arg2;
-            if (next->flags == OP_SHARED_BUFF) {
-                struct shared_buff *in = data;
-                result.shared_buff = *in;
-            } else {
-                int64 *in = data;
-                result.val64 = *in;
-            }
+            copy_scalar(result.bytes, data, next->flags);
+            result_mode = scalar_mem_mode(next->flags);
             break;
+          }
+        case OP_POINTER_INCREMENT_REFCOUNT:
+          {
+              void *data = arg1_full.pointer + arg2;
+              struct shared_buff *buff = (struct shared_buff*)data;
+              if (buff->ptr) {
+                  buff->ptr->references += 1;
+              }
+              if (debug) {
+                  print_ref_count(buff->ptr);
+                  printf("count is %d\n", buff->count);
+              }
+              break;
+          }
+        case OP_POINTER_DECREMENT_REFCOUNT:
+          {
+              void *data = arg1_full.pointer + arg2;
+              struct shared_buff *buff = (struct shared_buff*)data;
+              shared_buff_decrement(buff->ptr);
+              break;
           }
         default:
             fprintf(stderr, "Error: Tried to execute unknown opcode %d.\n",

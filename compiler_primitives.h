@@ -149,13 +149,37 @@ void compile_mov(
 /* When we write a struct to a location, we then need to increment some of the
    reference counts in that struct. This function will statically generate the
    instructions required to do that. */
-void compile_struct_increment(
+void compile_increments(
     struct instruction_buffer *out,
     struct ref val,
+    size_t offset,
     struct type *element_type
 ) {
-    fprintf(stderr, "Warning: copying complex structs is not yet "
-        "implemented.\n");
+    if (element_type->connective == TYPE_ARRAY) {
+        struct instruction *instr = buffer_addn(*out, 1);
+        /* if (decrement) instr->op = OP_POINTER_DECREMENT_REFCOUNT; */
+        /* else */
+        instr->op = OP_POINTER_INCREMENT_REFCOUNT;
+        instr->output.type = REF_NULL;
+        instr->arg1 = val;
+        instr->arg2.type = REF_CONSTANT;
+        instr->arg2.x = offset;
+    } else if (element_type->connective == TYPE_TUPLE) {
+        for (int i = 0; i < element_type->elements.count; i++) {
+            struct type *it = &element_type->elements.data[i];
+            compile_increments(out, val, offset, it);
+            offset += it->total_size;
+        }
+    } else if (element_type->connective == TYPE_RECORD) {
+        for (int i = 0; i < element_type->fields.count; i++) {
+            struct type *it = &element_type->fields.data[i].type;
+            compile_increments(out, val, offset, it);
+            offset += it->total_size;
+        }
+    } else if (element_type->connective != TYPE_INT) {
+        fprintf(stderr, "Warning: copying type connective %d is not yet "
+            "implemented.\n", element_type->connective);
+    }
 }
 
 struct type compile_store(
@@ -191,7 +215,7 @@ struct type compile_store(
                is not a temporary, then we can use the pointer multiple times
                to increment all the arrays inside it, without the pointer
                getting discarded. */
-            compile_struct_increment(out, val.ref, &val.type);
+            compile_increments(out, val.ref, 0, &val.type);
         }
 
         /* Now compile the actual copy operation. */

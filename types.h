@@ -320,6 +320,8 @@ enum operation {
     OP_POINTER_STORE,
     OP_POINTER_COPY,
     OP_POINTER_LOAD,
+    OP_POINTER_INCREMENT_REFCOUNT,
+    OP_POINTER_DECREMENT_REFCOUNT,
 };
 
 enum operation_flags {
