@@ -13,8 +13,11 @@ struct intermediate_buffer parse_statement(
     bool global,
     bool end_on_eol,
     struct type_buffer *return_signature,
-    str proc_name
+    str proc_name,
+    bool *all_paths_return_ptr
 ) {
+    if (all_paths_return_ptr) *all_paths_return_ptr = false;
+
     struct token tk = get_token(tokenizer);
     if (tk.id == TOKEN_RETURN) {
         if (!return_signature) {
@@ -47,6 +50,8 @@ struct intermediate_buffer parse_statement(
         compile_return(out, bindings, &intermediates);
 
         buffer_free(intermediates);
+
+        if (all_paths_return_ptr) *all_paths_return_ptr = true;
     } else {
         put_token_back(tokenizer, tk);
 
@@ -258,12 +263,22 @@ struct record_entry parse_procedure(
 
         buffer_free(intermediates);
     } else if (tk.id == '{') {
+        bool have_returned = false;
+        bool have_warned = false;
         while (true) {
-            struct token tk = get_token(tokenizer);
+            tk = get_token(tokenizer);
             if (tk.id == '}') break;
             /* else */
 
             put_token_back(tokenizer, tk);
+            if (have_returned && !have_warned) {
+                /* Got a statement after we already returned, print a
+                   warning. */
+                fprintf(stderr, "Warning at line %d, %d: Statement cannot be "
+                    "reached.\n", tk.row, tk.column);
+                have_warned = true;
+            }
+            bool statement_returns = false;
             struct intermediate_buffer intermediates = parse_statement(
                 out,
                 tokenizer,
@@ -271,12 +286,26 @@ struct record_entry parse_procedure(
                 false, /* Declarations are not globals. */
                 false, /* Do not parse like it is an expression in the REPL. */
                 &output_types,
-                proc_name
+                proc_name,
+                &statement_returns
             );
+            if (statement_returns) have_returned = true;
             /* If the statement was a bare expression, discard the results of
                that expression. */
             compile_multivalue_decrements(out, &intermediates);
             buffer_free(intermediates);
+        }
+
+        if (!have_returned) {
+            if (output_types.count == 0) {
+                struct intermediate_buffer intermediates = {0};
+                compile_return(out, bindings, &intermediates);
+            } else {
+                fprintf(stderr, "Error at line %d, %d: The function \"",
+                    tk.row, tk.column);
+                fputstr(proc_name, stderr);
+                fprintf(stderr, "\" might not return a value.\n");
+            }
         }
     } else {
         fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
@@ -336,7 +365,8 @@ struct item parse_item(
             true,
             repl,
             NULL,
-            (str){NULL, 0}
+            (str){NULL, 0},
+            NULL
         );
 
         result.type = ITEM_STATEMENT;
