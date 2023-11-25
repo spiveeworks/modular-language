@@ -149,12 +149,17 @@ void copy_vals(struct type *element_type, void *dest, void *source, int count) {
     }
 }
 
-void copy_scalar(uint8 *dest, uint8 *src, enum operation_flags flags) {
+void copy_scalar(
+    uint8 *dest,
+    uint8 *src,
+    enum operation_flags flags,
+    bool temporary
+) {
     if (flags == OP_SHARED_BUFF) {
         struct shared_buff *src_buff = (struct shared_buff*)src;
         struct shared_buff *dest_buff = (struct shared_buff*)dest;
         *dest_buff = *src_buff;
-        if (src_buff->ptr != NULL) {
+        if (!temporary && src_buff->ptr != NULL) {
             src_buff->ptr->references += 1;
             if (debug) {
                 print_ref_count(src_buff->ptr);
@@ -201,24 +206,9 @@ union variable_contents {
     struct shared_buff shared_buff;
 };
 
-enum variable_memory_mode {
-    VARIABLE_UNBOUND,
-    VARIABLE_DIRECT_VALUE, /* Do nothing when the variable is unbound. */
-    VARIABLE_MEMORY_STACK, /* Free the memory stack back to this variable. */
-    VARIABLE_HEAP_OWNED, /* Free this variable from the heap. */
-    /* TODO: change this to VARIABLE_SHARED_BUFF? */
-    VARIABLE_REFCOUNT /* Decrement this variable's reference count, and free it
-                         if the count is zero. */
-};
-
-enum variable_memory_mode scalar_mem_mode(enum operation_flags flags) {
-    if (flags == OP_SHARED_BUFF) return VARIABLE_REFCOUNT;
-    /* else */ return VARIABLE_DIRECT_VALUE;
-}
-
+/* TODO: Remove this struct. */
 struct variable_data {
     union variable_contents value;
-    enum variable_memory_mode mem_mode;
 };
 
 /* Stores the actual value or memory location of each variable in use by the
@@ -271,19 +261,15 @@ void call_stack_push_exec_frame(
 union variable_contents read_ref(
     struct execution_frame *frame,
     struct variable_stack *vars,
-    struct ref ref,
-    enum variable_memory_mode *mem_mode
+    struct ref ref
 ) {
     size_t index = 0;
     switch (ref.type) {
     case REF_NULL:
-        if (mem_mode) *mem_mode = VARIABLE_DIRECT_VALUE;
         return (union variable_contents){0};
     case REF_CONSTANT:
-        if (mem_mode) *mem_mode = VARIABLE_DIRECT_VALUE;
         return (union variable_contents){.val64 = ref.x};
     case REF_STATIC_POINTER:
-        if (mem_mode) *mem_mode = VARIABLE_DIRECT_VALUE;
         return (union variable_contents){.pointer = (void*)ref.x};
     case REF_GLOBAL:
         index = ref.x;
@@ -299,7 +285,6 @@ union variable_contents read_ref(
         exit(EXIT_FAILURE);
     }
 
-    if (mem_mode) *mem_mode = vars->data[index].mem_mode;
     return vars->data[index].value;
 }
 
@@ -307,8 +292,7 @@ void write_ref(
     struct execution_frame *frame,
     struct variable_stack *vars,
     struct ref ref,
-    union variable_contents value,
-    enum variable_memory_mode mem_mode
+    union variable_contents value
 ) {
     size_t index = 0;
     switch (ref.type) {
@@ -333,21 +317,6 @@ void write_ref(
     }
     if (index + 1 > vars->count) buffer_setcount(*vars, index + 1);
     vars->data[index].value = value;
-    vars->data[index].mem_mode = mem_mode;
-}
-
-void unbind_variable(struct variable_stack *vars, size_t index) {
-    if (vars->data[index].mem_mode == VARIABLE_REFCOUNT) {
-        shared_buff_decrement(vars->data[index].value.shared_buff.ptr);
-    }
-    vars->data[index].mem_mode = VARIABLE_UNBOUND;
-}
-
-void unbind_temporaries(struct variable_stack *vars) {
-    while (vars->count > vars->global_count) {
-        unbind_variable(vars, vars->count - 1);
-        vars->count -= 1;
-    }
 }
 
 void continue_execution(
@@ -364,27 +333,24 @@ void continue_execution(
         struct instruction *next = &frame->start[frame->current];
 
         /* Execute instruction. */
-        enum variable_memory_mode arg1_mode, arg2_mode;
-        /* TODO: refactor this into functions that extract
-           scalars/shared_buffs, checking that the mem_mode is correct as they
-           go. May require detecting and separating out scalar operations,
-           which is something that I am considering anyway. */
         union variable_contents arg1_full =
-            read_ref(frame, &stack->vars, next->arg1, &arg1_mode);
+            read_ref(frame, &stack->vars, next->arg1);
         union variable_contents arg2_full =
-            read_ref(frame, &stack->vars, next->arg2, &arg2_mode);
+            read_ref(frame, &stack->vars, next->arg2);
         int64 arg1 = arg1_full.val64;
         int64 arg2 = arg2_full.val64;
         union variable_contents result = {0};
-        enum variable_memory_mode result_mode = VARIABLE_DIRECT_VALUE;
         struct ref output_ref = next->output;
-        bool discard_arg1 = next->arg1.type == REF_TEMPORARY;
         switch (next->op) {
         case OP_NULL:
             break;
         case OP_MOV:
-            copy_scalar(result.bytes, arg1_full.bytes, next->flags);
-            result_mode = scalar_mem_mode(next->flags);
+            copy_scalar(
+                result.bytes,
+                arg1_full.bytes,
+                next->flags,
+                next->arg1.type == REF_TEMPORARY
+            );
             break;
         case OP_LOR:
             result.val64 = arg1 || arg2;
@@ -473,13 +439,7 @@ void continue_execution(
             new.locals_start = stack->vars.count - arg2;
             new.locals_count = arg2;
             if (next->arg1.type == REF_TEMPORARY) {
-                /* Unbind the variable, and let the results overwrite it. */
-                int index = frame->locals_start + frame->locals_count
-                    + next->arg1.x;
-                unbind_variable(&stack->vars, index);
                 new.results_start = new.locals_start - 1;
-                /* Don't discard it, it's already discarded! */
-                discard_arg1 = false;
             } else {
                 new.results_start = new.locals_start;
             }
@@ -493,21 +453,10 @@ void continue_execution(
             /* Unbind all variables that aren't being returned. */
             int source_offset = stack->vars.count - arg1;
             int dest_offset = frame->results_start;
-            for (int i = dest_offset; i < source_offset; i++) {
-                unbind_variable(&stack->vars, i);
-            }
             /* Move results up the stack, to where the inputs were. */
             for (int i = 0; i < arg1; i++) {
                 stack->vars.data[dest_offset + i] =
                     stack->vars.data[source_offset + i];
-            }
-            /* Unbind the original copies of the return values. */
-            int unbind_start = source_offset;
-            if (dest_offset + arg1 > unbind_start) {
-                unbind_start = dest_offset + arg1;
-            }
-            for (int i = unbind_start; i < stack->vars.count; i++) {
-                stack->vars.data[i].mem_mode = VARIABLE_UNBOUND;
             }
 
             stack->exec.count -= 1;
@@ -516,22 +465,25 @@ void continue_execution(
         }
         case OP_ARRAY_ALLOC:
             result.shared_buff = shared_buff_alloc((struct type *)arg1_full.pointer, arg2);
-            result_mode = VARIABLE_REFCOUNT;
             break;
         case OP_ARRAY_OFFSET:
             result.pointer = shared_buff_get_index(arg1_full.shared_buff, arg2);
-            discard_arg1 = false;
             break;
         case OP_ARRAY_STORE:
           {
             /* TODO: check that the 'output' array is a shared_buff. */
             union variable_contents output =
-                read_ref(frame, &stack->vars, output_ref, NULL);
+                read_ref(frame, &stack->vars, output_ref);
             /* TODO: check that the memory accessed is actually an initialised
                and aligned part of the buffer. */
             uint8 *data = shared_buff_get_index(output.shared_buff, arg1);
             struct type *element_type = output.shared_buff.ptr->element_type;
-            copy_scalar(data, arg2_full.bytes, next->flags);
+            copy_scalar(
+                data,
+                arg2_full.bytes,
+                next->flags,
+                next->arg2.type == REF_TEMPORARY
+            );
             /* Stop the array variable from being overwritten. */
             output_ref.type = REF_NULL;
             break;
@@ -546,13 +498,10 @@ void continue_execution(
                 fprintf(stderr, "Error: Arrays of structs are not implemented.\n");
                 exit(EXIT_FAILURE);
             }
-            copy_scalar(result.bytes, data, next->flags);
-            result_mode = scalar_mem_mode(next->flags);
-            if (element_type->connective == TYPE_ARRAY) {
-                result_mode = VARIABLE_REFCOUNT;
-            } else if (element_type->connective != TYPE_INT) {
-                fprintf(stderr, "Warning: Array contains types other than "
-                    "arrays or ints, runtime may leak it.\n");
+            copy_scalar(result.bytes, data, next->flags, false);
+            if (next->output.type == next->arg1.type && next->output.x == next->arg1.x) {
+                /* If we are overwriting the array, then decrement it first. */
+                shared_buff_decrement(arg1_full.shared_buff.ptr);
             }
             break;
           }
@@ -566,7 +515,6 @@ void continue_execution(
             int arg2_count = arg2_full.shared_buff.count;
             int result_count = arg1_count + arg2_count;
             result.shared_buff = shared_buff_alloc(element_type, result_count);
-            result_mode = VARIABLE_REFCOUNT;
 
             /* TODO: do these need to be checked? Or can we get more lean?
                Inlining may resolve this anyway. */
@@ -578,26 +526,36 @@ void continue_execution(
             uint8 *dest_2 = shared_buff_get_index(result.shared_buff, arg1_count);
             copy_vals(element_type, dest_2, source_2, arg2_count);
 
+            if (next->arg1.type == REF_TEMPORARY) {
+                shared_buff_decrement(arg1_full.shared_buff.ptr);
+            }
+            if (next->arg2.type == REF_TEMPORARY) {
+                shared_buff_decrement(arg2_full.shared_buff.ptr);
+            }
+
             break;
           }
         case OP_STACK_ALLOC:
             fprintf(stderr, "Warning: Data stack unimplemented. Using malloc.\n");
             result.pointer = malloc(arg1);
-            result_mode = VARIABLE_MEMORY_STACK;
             break;
         case OP_POINTER_OFFSET:
             result.pointer = arg1_full.pointer + arg2;
-            discard_arg1 = false;
             break;
         case OP_POINTER_STORE:
           {
             /* TODO: check that the 'output' array is a shared_buff. */
             union variable_contents output =
-                read_ref(frame, &stack->vars, output_ref, NULL);
+                read_ref(frame, &stack->vars, output_ref);
             /* TODO: check that the memory accessed is actually an initialised
                and aligned part of the buffer. */
             void *data = output.pointer + arg1;
-            copy_scalar(data, arg2_full.bytes, next->flags);
+            copy_scalar(
+                data,
+                arg2_full.bytes,
+                next->flags,
+                next->arg2.type == REF_TEMPORARY
+            );
             /* Stop the struct variable from being overwritten. */
             output_ref.type = REF_NULL;
             break;
@@ -605,7 +563,7 @@ void continue_execution(
         case OP_POINTER_COPY:
           {
             union variable_contents output =
-                read_ref(frame, &stack->vars, output_ref, NULL);
+                read_ref(frame, &stack->vars, output_ref);
             memcpy(output.pointer, arg1_full.pointer, arg2);
             /* Stop the struct variable from being overwritten. */
             output_ref.type = REF_NULL;
@@ -614,8 +572,7 @@ void continue_execution(
         case OP_POINTER_LOAD:
           {
             void *data = arg1_full.pointer + arg2;
-            copy_scalar(result.bytes, data, next->flags);
-            result_mode = scalar_mem_mode(next->flags);
+            copy_scalar(result.bytes, data, next->flags, true);
             break;
           }
         case OP_POINTER_INCREMENT_REFCOUNT:
@@ -644,20 +601,7 @@ void continue_execution(
             exit(EXIT_FAILURE);
         }
 
-        if (discard_arg1) {
-            unbind_variable(
-                &stack->vars,
-                frame->locals_start + frame->locals_count + next->arg1.x
-            );
-        }
-        if (next->arg2.type == REF_TEMPORARY) {
-            unbind_variable(
-                &stack->vars,
-                frame->locals_start + frame->locals_count + next->arg2.x
-            );
-        }
-
-        write_ref(frame, &stack->vars, output_ref, result, result_mode);
+        write_ref(frame, &stack->vars, output_ref, result);
 
         if (next->output.type == REF_LOCAL
             && next->output.x >= frame->locals_count)
@@ -667,10 +611,6 @@ void continue_execution(
             && next->output.x >= stack->vars.global_count)
         {
             stack->vars.global_count = next->output.x + 1;
-        }
-
-        while (buffer_top(stack->vars)->mem_mode == VARIABLE_UNBOUND) {
-            stack->vars.count -= 1;
         }
 
         /* We may have just returned, in which case this change is allowed, but
@@ -692,10 +632,12 @@ void execute_top_level_code(
         exit(EXIT_FAILURE);
     }
 
-    unbind_temporaries(&stack->vars);
     call_stack_push_exec_frame(stack, statement_code);
 
     continue_execution(procedures, stack);
+
+    /* Discard any locals or temporaries. */
+    buffer_setcount(stack->vars, stack->vars.global_count);
 }
 
 #endif

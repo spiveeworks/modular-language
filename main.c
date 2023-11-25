@@ -107,6 +107,23 @@ void print_call_stack_value(union variable_contents it, struct type *type) {
     }
 }
 
+void print_multi_expression(
+    struct variable_stack *vars,
+    struct intermediate_buffer *intermediates
+) {
+    for (int i = 0; i < intermediates->count; i++) {
+        if (i > 0) printf(", ");
+
+        struct intermediate *it = &intermediates->data[i];
+        /* Kinda hacky, just reuse the interpreter's read_ref function,
+           but with a bogus execution frame representing the fact that
+           there are no local variables. */
+        struct execution_frame frame = {.locals_count = vars->global_count};
+        union variable_contents val = read_ref(&frame, vars, it->ref);
+        print_call_stack_value(val, &it->type);
+    }
+}
+
 struct statement {
     struct instruction_buffer instructions;
     struct intermediate_buffer intermediates;
@@ -194,7 +211,6 @@ int main(int argc, char **argv) {
             bindings.global_count = bindings.count;
 
             struct variable_data *var = buffer_addn(call_stack.vars, 1);
-            var->mem_mode = VARIABLE_DIRECT_VALUE;
             var->value.val64 = procedures.count - 1;
             call_stack.vars.global_count = bindings.global_count;
         } else if (item.type == ITEM_NULL) {
@@ -213,7 +229,6 @@ int main(int argc, char **argv) {
         int prev_global_count = call_stack.vars.global_count;
 
         if (debug) printf("\nExecuting.\n");
-        struct intermediate_buffer results = {0};
         for (int i = 0; i < statements.count; i++) {
             struct statement *it = &statements.data[i];
             execute_top_level_code(procedures, &call_stack, &it->instructions);
@@ -222,10 +237,18 @@ int main(int argc, char **argv) {
             /* Top level statements are fired once and then forgotten. */
             buffer_free(it->instructions);
 
-            /* Overwrite results with this statement. At the end of the loop we
-               will be left with the last statement's results. */
-            buffer_free(results);
-            results = it->intermediates;
+            if (repl && it->intermediates.count > 0) {
+                /* If the last statement in this line was a bare expression,
+                   print its results. */
+                /* Technically these will be past the actual initialized count
+                   of the variable stack, but they'll still be written there,
+                   so it's okay. */
+                printf("result = ");
+                print_multi_expression(&call_stack.vars, &it->intermediates);
+                printf("\n");
+            }
+
+            buffer_free(it->intermediates);
         }
         /* Empty the statement buffer, and reuse it next loop. */
         statements.count = 0;
@@ -248,32 +271,6 @@ int main(int argc, char **argv) {
             print_call_stack_value(call_stack.vars.data[i].value, &bindings.data[i].type);
             printf("\n");
         }
-
-        if (repl && results.count > 0) {
-            /* If the last statement in this line was a bare expression, print
-               its results. */
-            printf("result = ");
-            for (int i = 0; i< results.count; i++) {
-                if (i > 0) printf(", ");
-
-                struct intermediate *it = &results.data[i];
-                /* Kinda hacky, just reuse the interpreter's read_ref function,
-                   but with a bogus execution frame representing the fact that
-                   there are no local variables. */
-                struct execution_frame frame = {.locals_count = call_stack.vars.global_count};
-                union variable_contents val = read_ref(
-                    &frame,
-                    &call_stack.vars,
-                    it->ref,
-                    NULL
-                );
-                print_call_stack_value(val, &it->type);
-            }
-            printf("\n");
-        }
-
-        buffer_free(results);
-        unbind_temporaries(&call_stack.vars);
 
         if (repl) printf("> ");
     }
