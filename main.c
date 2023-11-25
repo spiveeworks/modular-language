@@ -182,6 +182,7 @@ int main(int argc, char **argv) {
     struct procedure_buffer procedures = {0};
     struct record_table bindings = {0};
     struct call_stack call_stack = {0};
+    call_stack.data = stack_create(1 << 20); /* A megabyte of memory, why not? */
 
     struct statement_buffer statements = {0};
 

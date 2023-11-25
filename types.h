@@ -322,8 +322,10 @@ enum operation {
     OP_ARRAY_CONCAT,
     OP_DECREMENT_REFCOUNT, /* May be redundant with OP_MOV to REF_NULL */
 
-    /* Pointer operations, for manipulating tuples and records. */
+    /* Stack operations, for allocating/freeing tuples and records. */
     OP_STACK_ALLOC,
+    OP_STACK_FREE,
+    /* Pointer operations, for manipulating tuples and records. */
     OP_POINTER_OFFSET, /* Like add, but don't discard arg1. */
     OP_POINTER_STORE,
     OP_POINTER_COPY,

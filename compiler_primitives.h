@@ -182,6 +182,33 @@ void compile_pointer_refcounts(
     }
 }
 
+void compile_copy(
+    struct instruction_buffer *out,
+    struct ref to_ptr,
+    struct ref from_ptr,
+    struct type *type
+) {
+    struct instruction *instr = buffer_addn(*out, 1);
+    instr->op = OP_POINTER_COPY;
+    instr->output = to_ptr;
+    instr->arg1 = from_ptr;
+    instr->arg2.type = REF_CONSTANT;
+    instr->arg2.x = type->total_size;
+
+    if (from_ptr.type == REF_TEMPORARY) {
+        /* Use the contents of the struct as is, and just free the struct. */
+        instr = buffer_addn(*out, 1);
+        instr->op = OP_STACK_FREE;
+        instr->output.type = REF_NULL;
+        instr->arg1 = from_ptr;
+        instr->arg2.type = REF_NULL;
+    } else {
+        /* It is not a temporary, so sweep through it to increment any
+           reference counted pointers that were just copied. */
+        compile_pointer_refcounts(out, from_ptr, 0, type, false);
+    }
+}
+
 struct type compile_store(
     struct instruction_buffer *out,
     struct ref to_ptr,
@@ -209,37 +236,19 @@ struct type compile_store(
         instr->arg1.x = offset;
         instr->arg2 = val.ref;
     } else if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
-        /* First compile the reference count increments, if any. */
-        if (val.ref.type != REF_TEMPORARY) {
-            /* If val is a temporary, then we can discard the old memory. If it
-               is not a temporary, then we can use the pointer multiple times
-               to increment all the arrays inside it, without the pointer
-               getting discarded. */
-            compile_pointer_refcounts(out, val.ref, 0, &val.type, false);
-        }
-
-        /* Now compile the actual copy operation. */
-        struct instruction *instrs = buffer_addn(*out, 2);
-
-        /* TODO: If offset is 0 then we should write directly to the pointer,
-           but without discarding it, even though it is temporary... Requires
-           actual flags for dealing with temporaries though, instead of what we
-           are doing now. */
         /* We immediately use our own temporary, so we don't need to add
            anything to the intermediates buffer. */
         struct ref offset_ptr = {REF_TEMPORARY};
-        offset_ptr.x = intermediates->temporaries_count;
-        instrs[0].op = OP_POINTER_OFFSET;
-        instrs[0].output = offset_ptr;
-        instrs[0].arg1 = to_ptr;
-        instrs[0].arg2.type = REF_CONSTANT;
-        instrs[0].arg2.x = offset;
 
-        instrs[1].op = OP_POINTER_COPY;
-        instrs[1].output = offset_ptr;
-        instrs[1].arg1 = val.ref;
-        instrs[1].arg2.type = REF_CONSTANT;
-        instrs[1].arg2.x = val.type.total_size;
+        struct instruction *instr = buffer_addn(*out, 1);
+        offset_ptr.x = intermediates->temporaries_count;
+        instr->op = OP_POINTER_OFFSET;
+        instr->output = offset_ptr;
+        instr->arg1 = to_ptr;
+        instr->arg2.type = REF_CONSTANT;
+        instr->arg2.x = offset;
+
+        compile_copy(out, offset_ptr, val.ref, &val.type);
     } else {
         fprintf(stderr, "Error: Store instructions are only "
             "implemented for arrays and 64 bit integers.\n");
@@ -480,6 +489,13 @@ void compile_variable_decrements(
         instr->arg2.type = REF_NULL;
     } else if (type->connective == TYPE_TUPLE || type->connective == TYPE_RECORD) {
         compile_pointer_refcounts(out, it, 0, type, true);
+
+        struct instruction *instr = buffer_addn(*out, 1);
+        instr->op = OP_STACK_FREE;
+        instr->flags = 0;
+        instr->output.type = REF_NULL;
+        instr->arg1 = it;
+        instr->arg2.type = REF_NULL;
     } else if (type->connective != TYPE_INT) {
         fprintf(stderr, "Warning: Unknown type will be put on the stack, it "
             "may leak memory.\n");

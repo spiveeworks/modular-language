@@ -224,11 +224,52 @@ struct variable_stack {
 /* Stores fixed-size structures too big to fit in the variable stack, but too
    small to be worth sharing, or maybe even arrays that have been analysed and
    happen to be used in a LIFO way anyway. */
-/*
-struct memory_stack {
-
+/* TODO: Get the stack allocator over from the gizmo headers? We might not want
+   all of the baggage of allocator interfaces and mem.h and serialization and
+   so on, though... */
+struct data_stack {
+    uint8 *data;
+    size_t allocated_count;
+    size_t size; /* Don't call it capacity, since we don't actually want to use
+                    buffer macros on it. */
 };
-*/
+
+struct data_stack stack_create(size_t size) {
+    struct data_stack result;
+    result.data = malloc(size);
+    result.allocated_count = 0;
+    result.size = size;
+
+    return result;
+}
+
+uint8 *stack_alloc(struct data_stack *stack, size_t count) {
+    if (stack->allocated_count + count > stack->size) {
+        fprintf(stderr, "Error: Ran out of memory in the data stack.\n");
+        exit(EXIT_FAILURE);
+    }
+
+    uint8 *result = stack->data + stack->allocated_count;
+    stack->allocated_count += count;
+
+    return result;
+}
+
+void stack_free(struct data_stack *stack, uint8 *ptr) {
+    if (ptr < stack->data || ptr > stack->data + stack->size) {
+        fprintf(stderr, "Warning: Tried to free memory location %llp from the "
+            "stack, but it wasn't on the stack.\n", (uint64)ptr);
+        return;
+    }
+
+    if (ptr > stack->data + stack->allocated_count) {
+        fprintf(stderr, "Warning: Tried to free memory location %llp, but it "
+            "was already free.\n", (uint64)ptr);
+        return;
+    }
+
+    stack->allocated_count = ptr - stack->data;
+}
 
 /* Logically this is a single heterogeneous stack, like the call stack of a CPU
    in virtual memory. In practice we split it across three homogeneous buffers,
@@ -237,7 +278,7 @@ struct memory_stack {
 struct call_stack {
     struct execution_stack exec;
     struct variable_stack vars;
-    /* struct memory_stack memory; */
+    struct data_stack data;
 };
 
 void call_stack_push_exec_frame(
@@ -539,8 +580,10 @@ void continue_execution(
             shared_buff_decrement(arg1_full.shared_buff.ptr);
             break;
         case OP_STACK_ALLOC:
-            fprintf(stderr, "Warning: Data stack unimplemented. Using malloc.\n");
-            result.pointer = malloc(arg1);
+            result.pointer = stack_alloc(&stack->data, arg1);
+            break;
+        case OP_STACK_FREE:
+            stack_free(&stack->data, arg1_full.pointer);
             break;
         case OP_POINTER_OFFSET:
             result.pointer = arg1_full.pointer + arg2;

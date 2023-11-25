@@ -576,34 +576,20 @@ void compile_end_arg(
             instr.arg1.x = em->args_handled;
             instr.arg2 = val.ref;
             buffer_push(*out, instr);
-        } else if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
-            /* First compile the reference count increments, if any. */
-            if (val.ref.type != REF_TEMPORARY) {
-                /* If val is a temporary, then we can discard the old memory.
-                   If it is not a temporary, then we can use the pointer
-                   multiple times to increment all the arrays inside it,
-                   without the pointer getting discarded. */
-                compile_pointer_refcounts(out, val.ref, 0, &val.type, false);
-            }
-
-            /* Next compile the actual copy operation. */
-            struct instruction *instrs = buffer_addn(*out, 2);
-
+        } else {
             /* We immediately use our own temporary, so we don't need to add
                anything to the intermediates buffer. */
             struct ref offset_ptr = {REF_TEMPORARY};
-            offset_ptr.x = intermediates->temporaries_count;
-            instrs[0].op = OP_ARRAY_OFFSET;
-            instrs[0].output = offset_ptr;
-            instrs[0].arg1 = pointer_val->ref;
-            instrs[0].arg2.type = REF_CONSTANT;
-            instrs[0].arg2.x = em->args_handled;
 
-            instrs[1].op = OP_POINTER_COPY;
-            instrs[1].output = offset_ptr;
-            instrs[1].arg1 = val.ref;
-            instrs[1].arg2.type = REF_CONSTANT;
-            instrs[1].arg2.x = val.type.total_size;
+            struct instruction *instr = buffer_addn(*out, 1);
+            offset_ptr.x = intermediates->temporaries_count;
+            instr->op = OP_ARRAY_OFFSET;
+            instr->output = offset_ptr;
+            instr->arg1 = pointer_val->ref;
+            instr->arg2.type = REF_CONSTANT;
+            instr->arg2.x = em->args_handled;
+
+            compile_copy(out, offset_ptr, val.ref, &val.type);
         }
         /* Pop after, now that we have finished making and using our own
            temporaries. */
