@@ -72,6 +72,36 @@ struct shared_buff shared_buff_alloc(struct type *elem_type, int count) {
     return result;
 }
 
+void shared_buff_decrement(struct shared_buff_header *ptr);
+
+/* Decrements the elements of an array of a known datatype. Passes through the
+   whole array multiple times, once for each offset where an array sits. This
+   performs best for structs with no arrays in them or just one array in them,
+   but probably still does well with two or three arrays. */
+do_decrements(uint8 *data, struct type *type, int count, size_t stride) {
+    if (type->connective == TYPE_ARRAY) {
+        for (int i = 0; i < count; i++) {
+            struct shared_buff *buff = (struct shared_buff*)data;
+            shared_buff_decrement(buff->ptr);
+            data += stride;
+        }
+    } else if (type->connective == TYPE_TUPLE) {
+        for (int i = 0; i < type->elements.count; i++) {
+            struct type *elem_type = &type->elements.data[i];
+            do_decrements(data, elem_type, count, stride);
+            data += elem_type->total_size;
+        }
+    } else if (type->connective == TYPE_RECORD) {
+        for (int i = 0; i < type->fields.count; i++) {
+            struct type *elem_type = &type->fields.data[i].type;
+            do_decrements(data, elem_type, count, stride);
+            data += elem_type->total_size;
+        }
+    } else if (type->connective != TYPE_INT) {
+        fprintf(stderr, "Warning: Got an unknown type connective, leaking.\n");
+    }
+}
+
 void shared_buff_decrement(struct shared_buff_header *ptr) {
     if (!ptr) return;
 
@@ -80,25 +110,14 @@ void shared_buff_decrement(struct shared_buff_header *ptr) {
     ptr->references -= 1;
     if (debug) print_ref_count(ptr);
     if (ptr->references <= 0) {
-        if (elem_type->connective == TYPE_ARRAY) {
-            uint8 *buff_start = (uint8*)&ptr[1];
-            struct shared_buff *arr =
-                (struct shared_buff*)(buff_start + ptr->start_offset);
-            for (int i = 0; i < ptr->count; i++) {
-                shared_buff_decrement(arr[i].ptr);
-            }
-        } else if (elem_type->connective != TYPE_INT) {
-            static bool warned_leak;
-            if (!warned_leak) {
-                fprintf(stderr, "Warning: Leaking data since aggregate "
-                    "garbage collection is not yet implemented.\n");
-                warned_leak = true;
-            }
-        }
+        uint8 *buff_start = (uint8*)&ptr[1];
+        uint8 *data = buff_start + ptr->start_offset;
+        do_decrements(data, elem_type, ptr->count, elem_type->total_size);
 
         free(ptr);
     }
 }
+
 
 void *shared_buff_get_index(struct shared_buff buff, int index) {
     if (index < 0 || index >= buff.count) {
