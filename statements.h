@@ -44,7 +44,7 @@ struct intermediate_buffer parse_statement(
 
         type_check_return(return_signature, &intermediates, proc_name);
 
-        compile_return(out, &intermediates);
+        compile_return(out, bindings, &intermediates);
 
         buffer_free(intermediates);
     } else {
@@ -246,7 +246,7 @@ struct record_entry parse_procedure(
 
         buffer_free(lhs);
 
-        compile_return(out, &intermediates);
+        compile_return(out, bindings, &intermediates);
         /* TODO: Unify these outputs */
         if (!result_specified) {
             for (int i = 0; i < intermediates.count; i++) {
@@ -264,12 +264,18 @@ struct record_entry parse_procedure(
             /* else */
 
             put_token_back(tokenizer, tk);
-            struct intermediate_buffer intermediates =
-                parse_statement(out, tokenizer, bindings, false, false, &output_types, proc_name);
-            if (intermediates.count > 0) {
-                fprintf(stderr, "Warning: Intermediates may not have been "
-                    "discared properly.\n");
-            }
+            struct intermediate_buffer intermediates = parse_statement(
+                out,
+                tokenizer,
+                bindings,
+                false, /* Declarations are not globals. */
+                false, /* Do not parse like it is an expression in the REPL. */
+                &output_types,
+                proc_name
+            );
+            /* If the statement was a bare expression, discard the results of
+               that expression. */
+            compile_multivalue_decrements(out, &intermediates);
             buffer_free(intermediates);
         }
     } else {

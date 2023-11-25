@@ -149,17 +149,17 @@ void compile_mov(
 /* When we write a struct to a location, we then need to increment some of the
    reference counts in that struct. This function will statically generate the
    instructions required to do that. */
-void compile_increments(
+void compile_pointer_refcounts(
     struct instruction_buffer *out,
     struct ref val,
     size_t offset,
-    struct type *element_type
+    struct type *element_type,
+    bool decrement /* The same logic can also be used for decrements. */
 ) {
     if (element_type->connective == TYPE_ARRAY) {
         struct instruction *instr = buffer_addn(*out, 1);
-        /* if (decrement) instr->op = OP_POINTER_DECREMENT_REFCOUNT; */
-        /* else */
-        instr->op = OP_POINTER_INCREMENT_REFCOUNT;
+        if (decrement) instr->op = OP_POINTER_DECREMENT_REFCOUNT;
+        else instr->op = OP_POINTER_INCREMENT_REFCOUNT;
         instr->output.type = REF_NULL;
         instr->arg1 = val;
         instr->arg2.type = REF_CONSTANT;
@@ -167,13 +167,13 @@ void compile_increments(
     } else if (element_type->connective == TYPE_TUPLE) {
         for (int i = 0; i < element_type->elements.count; i++) {
             struct type *it = &element_type->elements.data[i];
-            compile_increments(out, val, offset, it);
+            compile_pointer_refcounts(out, val, offset, it, decrement);
             offset += it->total_size;
         }
     } else if (element_type->connective == TYPE_RECORD) {
         for (int i = 0; i < element_type->fields.count; i++) {
             struct type *it = &element_type->fields.data[i].type;
-            compile_increments(out, val, offset, it);
+            compile_pointer_refcounts(out, val, offset, it, decrement);
             offset += it->total_size;
         }
     } else if (element_type->connective != TYPE_INT) {
@@ -215,7 +215,7 @@ struct type compile_store(
                is not a temporary, then we can use the pointer multiple times
                to increment all the arrays inside it, without the pointer
                getting discarded. */
-            compile_increments(out, val.ref, 0, &val.type);
+            compile_pointer_refcounts(out, val.ref, 0, &val.type, false);
         }
 
         /* Now compile the actual copy operation. */
@@ -442,33 +442,6 @@ void compile_proc_call(
     }
 }
 
-void compile_return(
-    struct instruction_buffer *out,
-    struct intermediate_buffer *intermediates
-) {
-    size_t val_count = intermediates->count;
-    if (val_count > 1) {
-        /* To implement multivalue return statements we would need to pass a
-           boolean into expression compilation, to allocate all things
-           immediately to the stack. This is similar to what we do for function
-           arguments, but at the top level of the expression now. */
-        fprintf(stderr, "Error: Multivalue return statements are not yet "
-            "implemented.\n");
-        exit(EXIT_FAILURE);
-    }
-    if (val_count == 1) {
-        compile_push(out, intermediates);
-    }
-
-    struct instruction *instr = buffer_addn(*out, 1);
-    instr->op = OP_RET;
-    instr->flags = 0;
-    instr->output.type = REF_NULL;
-    instr->arg1.type = REF_CONSTANT;
-    instr->arg1.x = val_count;
-    instr->arg2.type = REF_NULL;
-}
-
 void type_check_return(
     struct type_buffer *expected,
     struct intermediate_buffer *actual,
@@ -489,6 +462,79 @@ void type_check_return(
             fputstr(proc_name, stderr);
             fprintf(stderr, "\" had the wrong type.\n");
             exit(EXIT_FAILURE);
+        }
+    }
+}
+
+void compile_variable_decrements(
+    struct instruction_buffer *out,
+    struct ref it,
+    struct type *type
+) {
+    if (type->connective == TYPE_ARRAY) {
+        struct instruction *instr = buffer_addn(*out, 1);
+        instr->op = OP_DECREMENT_REFCOUNT;
+        instr->flags = 0;
+        instr->output.type = REF_NULL;
+        instr->arg1 = it;
+        instr->arg2.type = REF_NULL;
+    } else if (type->connective == TYPE_TUPLE || type->connective == TYPE_RECORD) {
+        compile_pointer_refcounts(out, it, 0, type, true);
+    } else if (type->connective != TYPE_INT) {
+        fprintf(stderr, "Warning: Unknown type will be put on the stack, it "
+            "may leak memory.\n");
+    }
+}
+
+void compile_local_decrements(
+    struct instruction_buffer *out,
+    struct record_table *bindings
+) {
+    for (int64 i = bindings->count - 1; i >= (int64)bindings->global_count; i--) {
+        struct record_entry *it = &bindings->data[i];
+        struct ref ref = {REF_LOCAL, i - bindings->global_count};
+        compile_variable_decrements(out, ref, &it->type);
+    }
+}
+
+void compile_return(
+    struct instruction_buffer *out,
+    struct record_table *bindings,
+    struct intermediate_buffer *intermediates
+) {
+    size_t val_count = intermediates->count;
+    if (val_count > 1) {
+        /* To implement multivalue return statements we would need to pass a
+           boolean into expression compilation, to allocate all things
+           immediately to the stack. This is similar to what we do for function
+           arguments, but at the top level of the expression now. */
+        fprintf(stderr, "Error: Multivalue return statements are not yet "
+            "implemented.\n");
+        exit(EXIT_FAILURE);
+    }
+    if (val_count == 1) {
+        compile_push(out, intermediates);
+    }
+
+    compile_local_decrements(out, bindings);
+
+    struct instruction *instr = buffer_addn(*out, 1);
+    instr->op = OP_RET;
+    instr->flags = 0;
+    instr->output.type = REF_NULL;
+    instr->arg1.type = REF_CONSTANT;
+    instr->arg1.x = val_count;
+    instr->arg2.type = REF_NULL;
+}
+
+void compile_multivalue_decrements(
+    struct instruction_buffer *out,
+    struct intermediate_buffer *intermediates
+) {
+    while (intermediates->count > 0) {
+        struct intermediate it = buffer_pop(*intermediates);
+        if (it.ref.type == REF_TEMPORARY) {
+            compile_variable_decrements(out, it.ref, &it.type);
         }
     }
 }

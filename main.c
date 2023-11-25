@@ -58,8 +58,11 @@ void disassemble_instructions(struct instruction_buffer instructions) {
             print_ref(instr->arg2);
             printf("\n");
         } else {
-            print_ref(instr->output);
-            printf(" = Op%d ", instr->op);
+            if (instr->output.type != REF_NULL) {
+                print_ref(instr->output);
+                printf(" = ", instr->op);
+            }
+            printf("Op%d ", instr->op);
             print_ref(instr->arg1);
             printf(", ");
             print_ref(instr->arg2);
@@ -248,7 +251,18 @@ int main(int argc, char **argv) {
                 printf("\n");
             }
 
+            struct instruction_buffer deinitialize_instructions = {0};
+            compile_multivalue_decrements(
+                &deinitialize_instructions,
+                &it->intermediates
+            );
+
+            execute_top_level_code(procedures, &call_stack, &deinitialize_instructions);
+            buffer_free(deinitialize_instructions);
             buffer_free(it->intermediates);
+
+            /* Discard any locals or temporaries. */
+            buffer_setcount(call_stack.vars, call_stack.vars.global_count);
         }
         /* Empty the statement buffer, and reuse it next loop. */
         statements.count = 0;

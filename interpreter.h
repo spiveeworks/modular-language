@@ -250,7 +250,7 @@ void call_stack_push_exec_frame(
     frame->count = code->count;
     frame->current = 0;
 
-    frame->locals_start = stack->vars.count;
+    frame->locals_start = stack->vars.global_count;
     frame->locals_count = 0;
     frame->results_start = stack->vars.count;
 }
@@ -535,6 +535,9 @@ void continue_execution(
 
             break;
           }
+        case OP_DECREMENT_REFCOUNT:
+            shared_buff_decrement(arg1_full.shared_buff.ptr);
+            break;
         case OP_STACK_ALLOC:
             fprintf(stderr, "Warning: Data stack unimplemented. Using malloc.\n");
             result.pointer = malloc(arg1);
@@ -635,9 +638,6 @@ void execute_top_level_code(
     call_stack_push_exec_frame(stack, statement_code);
 
     continue_execution(procedures, stack);
-
-    /* Discard any locals or temporaries. */
-    buffer_setcount(stack->vars, stack->vars.global_count);
 }
 
 #endif

@@ -143,6 +143,13 @@ struct record_table {
     size_t global_count;
 };
 
+/* TODO: What should these two structs actually be called? */
+struct field_record_table {
+    struct record_entry *data;
+    size_t count;
+    size_t capacity;
+};
+
 struct type;
 
 struct type_buffer {
@@ -161,7 +168,7 @@ struct type {
     union {
         uint8 word_size; /* 0 => 8 bits, up to 3 => 64 bits */
         struct type_buffer elements;
-        struct record_table fields;
+        struct field_record_table fields;
         struct type *inner;
         struct proc_signature proc;
     };
@@ -313,6 +320,7 @@ enum operation {
     OP_ARRAY_STORE,
     OP_ARRAY_INDEX,
     OP_ARRAY_CONCAT,
+    OP_DECREMENT_REFCOUNT, /* May be redundant with OP_MOV to REF_NULL */
 
     /* Pointer operations, for manipulating tuples and records. */
     OP_STACK_ALLOC,

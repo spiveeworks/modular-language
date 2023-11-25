@@ -583,7 +583,7 @@ void compile_end_arg(
                    If it is not a temporary, then we can use the pointer
                    multiple times to increment all the arrays inside it,
                    without the pointer getting discarded. */
-                compile_increments(out, val.ref, 0, &val.type);
+                compile_pointer_refcounts(out, val.ref, 0, &val.type, false);
             }
 
             /* Next compile the actual copy operation. */
