@@ -211,7 +211,7 @@ struct token get_token(struct tokenizer *tk) {
     } else if (IS_NUM(c)) {
         while (true) {
             c = tokenizer_peek_char(tk);
-            if (!IS_ALPHANUM(c) && c != '.') break;
+            if (!IS_ALPHANUM(c)) break;
 
             buffer_push(it, c);
             tk->column += 1;

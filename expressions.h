@@ -21,6 +21,7 @@ enum pattern_command_type {
 
     PATTERN_UNARY,
     PATTERN_BINARY,
+    PATTERN_MEMBER,
 
     PATTERN_PROCEDURE_CALL,
     PATTERN_ARRAY,
@@ -63,8 +64,7 @@ enum precedence_level {
     PRECEDENCE_COMPARATIVE,
     PRECEDENCE_ADDITIVE,
     PRECEDENCE_MULTIPLICATIVE,
-    PRECEDENCE_UNARY,
-    PRECEDENCE_STRUCTURAL
+    PRECEDENCE_UNARY
 };
 
 struct precedence_info {
@@ -89,8 +89,7 @@ struct precedence_info {
     {'&', PRECEDENCE_MULTIPLICATIVE},
     {'*', PRECEDENCE_MULTIPLICATIVE},
     {'/', PRECEDENCE_MULTIPLICATIVE},
-    {'%', PRECEDENCE_MULTIPLICATIVE},
-    {'.', PRECEDENCE_STRUCTURAL},
+    {'%', PRECEDENCE_MULTIPLICATIVE}
 };
 
 enum partial_operation_type {
@@ -228,6 +227,25 @@ void read_next_op(
     struct pattern *out
 ) {
     struct token tk = get_token(tokenizer);
+
+    /* dot operator, put the next token straight into a postfix type pattern
+       command, so that we don't try looking it up as a variable. */
+    if (tk.id == '.') {
+        tk = get_token(tokenizer);
+        if (tk.id != TOKEN_ALPHANUM && tk.id != TOKEN_NUMERIC) {
+            fprintf(stderr, "Error at line %d, %d: After a dot operator we "
+                "expect an identifier or an integer, but instead we got \"",
+                tk.row, tk.column);
+            fputstr(tk.it, stderr);
+            fprintf(stderr, "\".\n");
+        }
+
+        struct pattern_command command = {PATTERN_MEMBER};
+        command.tk = tk;
+        buffer_push(*out, command);
+
+        return;
+    }
 
     /* infix operators */
     for (int i = 0; i < ARRAY_LENGTH(precedence_info); i++) {
@@ -511,7 +529,7 @@ void compile_begin_emplace(
         next_emplace->size = 0;
 
         struct type array_type = type_array_of(type_int64);
-        struct ref array_temporary = push_intermediate(intermediates, array_type, false);
+        struct ref array_temporary = push_intermediate(intermediates, array_type);
 
         next_emplace->pointer_intermediate_index = intermediates->count - 1;
     } else if (c->type == PATTERN_STRUCT) {
@@ -519,12 +537,20 @@ void compile_begin_emplace(
         buffer_change_count(*out, 1);
         next_emplace->size = 0;
 
-        struct ref array_temporary = push_intermediate(intermediates, type_empty_tuple, true);
+        struct ref array_temporary = push_intermediate(intermediates, type_empty_tuple);
+        struct intermediate *val = buffer_top(*intermediates);
+        val->owns_stack_memory = true;
 
         next_emplace->pointer_intermediate_index = intermediates->count - 1;
-    } else {
+    } else if (c->type == PATTERN_PROCEDURE_CALL) {
         next_emplace->alloc_instruction_index = -1;
         next_emplace->size = 0;
+    } else {
+        fprintf(stderr, "Error at line %d, %d: Got unknown pattern command %d "
+            "from token \"", c->tk.row, c->tk.column, c->type);
+        fputstr(c->tk.it, stderr);
+        fprintf(stderr, "\".\n");
+        exit(EXIT_FAILURE);
     }
     next_emplace->args_handled = 0;
     next_emplace->args_total = c->arg_count;
@@ -579,7 +605,7 @@ void compile_end_arg(
         } else {
             /* We immediately use our own temporary, so we don't need to add
                anything to the intermediates buffer. */
-            struct ref offset_ptr = {REF_TEMPORARY};
+            struct ref offset_ptr = push_intermediate(intermediates, val.type);
 
             struct instruction *instr = buffer_addn(*out, 1);
             offset_ptr.x = intermediates->temporaries_count;
@@ -589,7 +615,8 @@ void compile_end_arg(
             instr->arg2.type = REF_CONSTANT;
             instr->arg2.x = em->args_handled;
 
-            compile_copy(out, offset_ptr, &val);
+            compile_copy(out, intermediates, offset_ptr, &val);
+            pop_intermediate(intermediates);
         }
         /* Pop after, now that we have finished making and using our own
            temporaries. */
@@ -650,6 +677,7 @@ void compile_end_emplace(
     } else if (em->type == PATTERN_STRUCT) {
         struct intermediate *pointer_val =
             &intermediates->data[em->pointer_intermediate_index];
+        pointer_val->stack_alloc_type = pointer_val->type;
         struct instruction *alloc_instr =
             &out->data[em->alloc_instruction_index];
         alloc_instr->op = OP_STACK_ALLOC;
@@ -688,6 +716,13 @@ struct intermediate_buffer compile_expression(
             /* TODO: detect if this is about to be assigned to a variable, and
                use that as the output if so. */
             compile_operation(
+                out,
+                bindings,
+                &intermediates,
+                c->tk
+            );
+        } else if (c->type == PATTERN_MEMBER) {
+            compile_struct_member(
                 out,
                 bindings,
                 &intermediates,
@@ -785,8 +820,17 @@ void assert_match_pattern(
 
         if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
             if (val.owns_stack_memory) {
-                /* Steal the memory and use it in-place. */
-                compile_mov(out, new_var, val.ref, &val.type);
+                if (val.stack_alloc_type.total_size == val.type.total_size) {
+                    if (val.ref_offset != 0) {
+                        fprintf(stderr, "Internal error: Pointer offset did "
+                            "not decrease referant size?\n");
+                    }
+                    /* Steal the memory and use it in-place. */
+                    compile_mov(out, new_var, val.ref, &val.type);
+                } else {
+                    fprintf(stderr, "Error: assignment from fields of struct literals is not yet implemented.\n");
+                    exit(EXIT_FAILURE);
+                }
             } else {
                 /* Allocate some new memory and copy the value in. */
                 struct instruction *instr = buffer_addn(*out, 1);
@@ -798,7 +842,9 @@ void assert_match_pattern(
                 instr->arg2.type = REF_NULL;
                 instr->arg2.x = 0;
 
-                compile_copy(out, new_var, &val);
+                /* Is it okay to pass values into this thing as our
+                   intermediate buffer? */
+                compile_copy(out, values, new_var, &val);
             }
         } else {
             compile_mov(out, new_var, val.ref, &val.type);

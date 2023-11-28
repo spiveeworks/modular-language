@@ -49,10 +49,12 @@ struct operator_info unary_ops = {
 struct intermediate {
     struct ref ref;
     struct type type;
+    struct type stack_alloc_type;
+    size_t ref_offset;
     /* bool is_pointer; */
     bool owns_stack_memory;
-    /* size_t ref_offset; */
-    /* size_t temp_stack_offset; */
+    bool stack_offset_known;
+    size_t temp_stack_offset;
 };
 
 struct intermediate_buffer {
@@ -72,7 +74,7 @@ struct intermediate pop_intermediate(struct intermediate_buffer *intermediates) 
     return result;
 }
 
-struct ref push_intermediate(struct intermediate_buffer *intermediates, struct type ty, bool owns_memory) {
+struct ref push_intermediate(struct intermediate_buffer *intermediates, struct type ty) {
     struct ref result;
     result.type = REF_TEMPORARY;
     result.x = intermediates->temporaries_count;
@@ -80,8 +82,8 @@ struct ref push_intermediate(struct intermediate_buffer *intermediates, struct t
     struct intermediate *loc = buffer_addn(*intermediates, 1);
     *loc = (struct intermediate){0};
     loc->type = ty;
+    loc->stack_alloc_type = ty;
     loc->ref = result;
-    loc->owns_stack_memory = owns_memory;
     intermediates->temporaries_count += 1;
 
     return result;
@@ -192,13 +194,34 @@ void compile_pointer_refcounts(
 
 void compile_copy(
     struct instruction_buffer *out,
+    struct intermediate_buffer *intermediates,
     struct ref to_ptr,
     struct intermediate *from_ptr
 ) {
+    struct ref from_ptr_offset = from_ptr->ref;
+    bool pushed_new = false;
+    if (from_ptr->ref_offset != 0) {
+        /* We need to offset the pointer first. Pick a register to store the
+           offset version of the pointer in. */
+        if (from_ptr->ref.type != REF_TEMPORARY || from_ptr->owns_stack_memory) {
+            /* from_ptr.ref is a variable or a struct literal, so allocate a
+               new temporary to store the pointer in. */
+            from_ptr_offset = push_intermediate(intermediates, from_ptr->type);
+            pushed_new = true;
+        } /* else we don't need from_ptr.ref, so just use it. */
+
+        struct instruction *instr = buffer_addn(*out, 1);
+        instr->op = OP_POINTER_OFFSET;
+        instr->output = from_ptr_offset;
+        instr->arg1 = from_ptr->ref;
+        instr->arg2.type = REF_CONSTANT;
+        instr->arg2.x = from_ptr->ref_offset;
+    }
+
     struct instruction *instr = buffer_addn(*out, 1);
     instr->op = OP_POINTER_COPY;
     instr->output = to_ptr;
-    instr->arg1 = from_ptr->ref;
+    instr->arg1 = from_ptr_offset;
     instr->arg2.type = REF_CONSTANT;
     instr->arg2.x = from_ptr->type.total_size;
 
@@ -214,6 +237,8 @@ void compile_copy(
            reference counted pointers that were just copied. */
         compile_pointer_refcounts(out, from_ptr->ref, 0, &from_ptr->type, false);
     }
+
+    if (pushed_new) pop_intermediate(intermediates);
 }
 
 struct type compile_store(
@@ -243,9 +268,7 @@ struct type compile_store(
         instr->arg1.x = offset;
         instr->arg2 = val.ref;
     } else if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
-        /* We immediately use our own temporary, so we don't need to add
-           anything to the intermediates buffer. */
-        struct ref offset_ptr = {REF_TEMPORARY};
+        struct ref offset_ptr = push_intermediate(intermediates, val.type);
 
         struct instruction *instr = buffer_addn(*out, 1);
         offset_ptr.x = intermediates->temporaries_count;
@@ -255,7 +278,9 @@ struct type compile_store(
         instr->arg2.type = REF_CONSTANT;
         instr->arg2.x = offset;
 
-        compile_copy(out, offset_ptr, &val);
+        compile_copy(out, intermediates, offset_ptr, &val);
+
+        pop_intermediate(intermediates);
     } else {
         fprintf(stderr, "Error: Store instructions are only "
             "implemented for arrays and 64 bit integers.\n");
@@ -391,10 +416,117 @@ void compile_operation(
     /* if (val1.ref.type == REF_TEMPORARY) destroy_type(&val1.type); */
     /* if (val2.ref.type == REF_TEMPORARY) destroy_type(&val2.type); */
 
-    result.output = push_intermediate(intermediates, result_type, false);
+    result.output = push_intermediate(intermediates, result_type);
 
     buffer_push(*out, result);
+}
 
+void compile_struct_member(
+    struct instruction_buffer *out,
+    struct record_table *bindings,
+    struct intermediate_buffer *intermediates,
+    struct token member_tk
+) {
+    struct intermediate *it = buffer_top(*intermediates);
+    struct type *member_ty = NULL;
+    size_t offset = it->ref_offset;
+    if (it->type.connective == TYPE_TUPLE) {
+        if (member_tk.id != TOKEN_NUMERIC) {
+            fprintf(stderr, "Error at line %d, %d: Tried to access the "
+                "field \"", member_tk.row, member_tk.column);
+            fputstr(member_tk.it, stderr);
+            fprintf(stderr, "\" in a tuple type.\n");
+        }
+
+        int64 value = integer_from_string(member_tk.it);
+        if (value >= it->type.elements.count) {
+            fprintf(stderr, "Error: Tried to access element %lld of a tuple "
+                "with only %llu elements.\n", value, it->type.elements.count);
+            exit(EXIT_FAILURE);
+        }
+        for (int i = 0; i < value; i++) {
+            offset += it->type.elements.data[i].total_size;
+        }
+        member_ty = &it->type.elements.data[value];
+    } else if (it->type.connective == TYPE_RECORD) {
+        fprintf(stderr, "Error: Field access in record types is not yet "
+            "implemented.\n");
+        exit(EXIT_FAILURE);
+    } else {
+        fprintf(stderr, "Error at line %d, %d: Tried to access a member of "
+            "something that wasn't a tuple or record type.\n",
+            member_tk.row, member_tk.column);
+        exit(EXIT_FAILURE);
+    }
+
+    if (member_ty->connective == TYPE_INT || member_ty->connective == TYPE_ARRAY) {
+        enum operation_flags flags = 0;
+        if (member_ty->connective == TYPE_ARRAY) flags = OP_SHARED_BUFF;
+        else flags = OP_64BIT;
+
+        if (it->owns_stack_memory) {
+            /* Reading a scalar from a struct literal, load the value, and then
+               destroy the struct. */
+            if (it->ref.type != REF_TEMPORARY) {
+                fprintf(stderr, "Internal error: Got an intermediate that "
+                    "owns stack memory, but isn't a temporary?\n");
+                exit(EXIT_FAILURE);
+            }
+
+            /* `output` should be the same ref as `it.ref`, but we want to free
+               `it.ref`. Load to an additional temporary first. */
+            struct ref tmp = push_intermediate(intermediates, *member_ty);
+
+            /* Load it to tmp */
+            struct instruction *instrs = buffer_addn(*out, 1);
+            instrs[0].op = OP_POINTER_LOAD;
+            instrs[0].flags = flags;
+            instrs[0].output = tmp;
+            instrs[0].arg1 = it->ref;
+            instrs[0].arg2.type = REF_CONSTANT;
+            instrs[0].arg2.x = offset;
+
+            /* Destroy and free it */
+            compile_pointer_refcounts(out, it->ref, 0, &it->stack_alloc_type, true);
+            instrs = buffer_addn(*out, 2);
+            instrs[0].op = OP_STACK_FREE;
+            instrs[0].flags = 0;
+            instrs[0].output.type = REF_NULL;
+            instrs[0].arg1 = it->ref;
+            instrs[0].arg2.type = REF_NULL;
+
+            /* Pop both the temporary and the pointer, and push the actual
+               output. */
+            pop_intermediate(intermediates);
+            pop_intermediate(intermediates);
+            struct ref output = push_intermediate(intermediates, *member_ty);
+
+            /* Move tmp to output (which was probably it.ref all along) */
+            instrs[1].op = OP_MOV;
+            instrs[1].flags = flags;
+            instrs[1].output = output;
+            instrs[1].arg1 = tmp;
+            instrs[1].arg2.type = REF_NULL;
+        } else {
+            /* Nothing to free, so just read it out. */
+            struct ref it_ref = it->ref;
+            pop_intermediate(intermediates);
+            struct ref output = push_intermediate(intermediates, *member_ty);
+
+            struct instruction *instr = buffer_addn(*out, 1);
+            instr->op = OP_POINTER_LOAD;
+            instr->flags = flags;
+            instr->output = output;
+            instr->arg1 = it_ref;
+            instr->arg2.type = REF_CONSTANT;
+            instr->arg2.x = offset;
+        }
+    } else {
+        /* We don't want to load anything yet, and the intermediate buffer can
+           take offsets, so just update the offset. */
+        it->ref_offset = offset;
+        it->type = *member_ty;
+    }
 }
 
 void compile_proc_call(
@@ -456,7 +588,7 @@ void compile_proc_call(
     buffer_maybe_grow(*intermediates, outputs.count);
     for (int i = 0; i < outputs.count; i++) {
         /* TODO: What if the outputs are tuples/records? */
-        push_intermediate(intermediates, outputs.data[i], false);
+        push_intermediate(intermediates, outputs.data[i]);
     }
 }
 
@@ -559,7 +691,7 @@ void compile_multivalue_decrements(
     while (intermediates->count > 0) {
         struct intermediate it = buffer_pop(*intermediates);
         if (it.ref.type == REF_TEMPORARY && (it.type.connective == TYPE_ARRAY || it.owns_stack_memory)) {
-            compile_variable_decrements(out, it.ref, &it.type);
+            compile_variable_decrements(out, it.ref, &it.stack_alloc_type);
         }
     }
 }

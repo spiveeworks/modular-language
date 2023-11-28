@@ -123,6 +123,7 @@ void print_multi_expression(
            there are no local variables. */
         struct execution_frame frame = {.locals_count = vars->global_count};
         union variable_contents val = read_ref(&frame, vars, it->ref);
+        val.pointer += it->ref_offset;
         print_call_stack_value(val, &it->type);
     }
 }

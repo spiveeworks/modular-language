@@ -618,7 +618,7 @@ void continue_execution(
         case OP_POINTER_LOAD:
           {
             void *data = arg1_full.pointer + arg2;
-            copy_scalar(result.bytes, data, next->flags, true);
+            copy_scalar(result.bytes, data, next->flags, false);
             break;
           }
         case OP_POINTER_INCREMENT_REFCOUNT:

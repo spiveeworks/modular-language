@@ -11,7 +11,15 @@ function free_test(x: Int) {
 }
 free_test(0);
 
-x := p1.0;
+x1 := p1.0;
+x2 := {5, 6}.1;
+
+triple := {1, {2, 3}};
+pair := triple.1;
+second := (triple.1).0;
+third := triple.1.1;
+
+pair2 := {1, {2, 3}}.1;
 
 p2 := {x: 2, y: 3};
 y := p2.y;
