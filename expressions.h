@@ -511,7 +511,7 @@ void compile_begin_emplace(
         next_emplace->size = 0;
 
         struct type array_type = type_array_of(type_int64);
-        struct ref array_temporary = push_intermediate(intermediates, array_type);
+        struct ref array_temporary = push_intermediate(intermediates, array_type, false);
 
         next_emplace->pointer_intermediate_index = intermediates->count - 1;
     } else if (c->type == PATTERN_STRUCT) {
@@ -519,7 +519,7 @@ void compile_begin_emplace(
         buffer_change_count(*out, 1);
         next_emplace->size = 0;
 
-        struct ref array_temporary = push_intermediate(intermediates, type_empty_tuple);
+        struct ref array_temporary = push_intermediate(intermediates, type_empty_tuple, true);
 
         next_emplace->pointer_intermediate_index = intermediates->count - 1;
     } else {
@@ -589,7 +589,7 @@ void compile_end_arg(
             instr->arg2.type = REF_CONSTANT;
             instr->arg2.x = em->args_handled;
 
-            compile_copy(out, offset_ptr, val.ref, &val.type);
+            compile_copy(out, offset_ptr, &val);
         }
         /* Pop after, now that we have finished making and using our own
            temporaries. */
@@ -767,18 +767,42 @@ void assert_match_pattern(
             exit(EXIT_FAILURE);
         }
 
+        size_t global_index = bindings->count;
         struct record_entry *new = buffer_addn(*bindings, 1);
         new->name = c->tk.it;
         struct intermediate val = buffer_pop(*values);
         new->type = val.type;
 
-        struct ref new_var = {REF_LOCAL, bindings->count - 1};
+        struct ref new_var;
         if (global) {
             new_var.type = REF_GLOBAL;
+            new_var.x = global_index;
             bindings->global_count = bindings->count;
+        } else {
+            new_var.type = REF_LOCAL;
+            new_var.x = global_index - bindings->global_count;
         }
 
-        compile_mov(out, new_var, val.ref, &val.type);
+        if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
+            if (val.owns_stack_memory) {
+                /* Steal the memory and use it in-place. */
+                compile_mov(out, new_var, val.ref, &val.type);
+            } else {
+                /* Allocate some new memory and copy the value in. */
+                struct instruction *instr = buffer_addn(*out, 1);
+                instr->op = OP_STACK_ALLOC;
+                instr->flags = 0;
+                instr->output = new_var;
+                instr->arg1.type = REF_CONSTANT;
+                instr->arg1.x = (int64)val.type.total_size;
+                instr->arg2.type = REF_NULL;
+                instr->arg2.x = 0;
+
+                compile_copy(out, new_var, &val);
+            }
+        } else {
+            compile_mov(out, new_var, val.ref, &val.type);
+        }
 
         if (pattern->count == 1 && values->count > 0) {
             struct token *tk = &pattern->data[0].tk;
@@ -789,6 +813,8 @@ void assert_match_pattern(
         }
 
         pattern->count -= 1;
+
+        /* TODO: Test for multi-value commas and pop them? I don't know. */
     }
 }
 

@@ -49,6 +49,10 @@ struct operator_info unary_ops = {
 struct intermediate {
     struct ref ref;
     struct type type;
+    /* bool is_pointer; */
+    bool owns_stack_memory;
+    /* size_t ref_offset; */
+    /* size_t temp_stack_offset; */
 };
 
 struct intermediate_buffer {
@@ -68,14 +72,16 @@ struct intermediate pop_intermediate(struct intermediate_buffer *intermediates) 
     return result;
 }
 
-struct ref push_intermediate(struct intermediate_buffer *intermediates, struct type ty) {
+struct ref push_intermediate(struct intermediate_buffer *intermediates, struct type ty, bool owns_memory) {
     struct ref result;
     result.type = REF_TEMPORARY;
     result.x = intermediates->temporaries_count;
 
     struct intermediate *loc = buffer_addn(*intermediates, 1);
+    *loc = (struct intermediate){0};
     loc->type = ty;
     loc->ref = result;
+    loc->owns_stack_memory = owns_memory;
     intermediates->temporaries_count += 1;
 
     return result;
@@ -96,6 +102,7 @@ void compile_value_token(
         }
 
         struct intermediate *loc = buffer_addn(*intermediates, 1);
+        *loc = (struct intermediate){0};
         loc->type = bindings->data[ind].type;
         if (ind < bindings->global_count) {
             loc->ref.type = REF_GLOBAL;
@@ -108,6 +115,7 @@ void compile_value_token(
         int64 value = integer_from_string(in->it);
 
         struct intermediate *loc = buffer_addn(*intermediates, 1);
+        *loc = (struct intermediate){0};
         loc->ref.type = REF_CONSTANT;
         loc->ref.x = value;
         loc->type = type_int64;
@@ -185,27 +193,26 @@ void compile_pointer_refcounts(
 void compile_copy(
     struct instruction_buffer *out,
     struct ref to_ptr,
-    struct ref from_ptr,
-    struct type *type
+    struct intermediate *from_ptr
 ) {
     struct instruction *instr = buffer_addn(*out, 1);
     instr->op = OP_POINTER_COPY;
     instr->output = to_ptr;
-    instr->arg1 = from_ptr;
+    instr->arg1 = from_ptr->ref;
     instr->arg2.type = REF_CONSTANT;
-    instr->arg2.x = type->total_size;
+    instr->arg2.x = from_ptr->type.total_size;
 
-    if (from_ptr.type == REF_TEMPORARY) {
+    if (from_ptr->owns_stack_memory) {
         /* Use the contents of the struct as is, and just free the struct. */
         instr = buffer_addn(*out, 1);
         instr->op = OP_STACK_FREE;
         instr->output.type = REF_NULL;
-        instr->arg1 = from_ptr;
+        instr->arg1 = from_ptr->ref;
         instr->arg2.type = REF_NULL;
     } else {
         /* It is not a temporary, so sweep through it to increment any
            reference counted pointers that were just copied. */
-        compile_pointer_refcounts(out, from_ptr, 0, type, false);
+        compile_pointer_refcounts(out, from_ptr->ref, 0, &from_ptr->type, false);
     }
 }
 
@@ -248,7 +255,7 @@ struct type compile_store(
         instr->arg2.type = REF_CONSTANT;
         instr->arg2.x = offset;
 
-        compile_copy(out, offset_ptr, val.ref, &val.type);
+        compile_copy(out, offset_ptr, &val);
     } else {
         fprintf(stderr, "Error: Store instructions are only "
             "implemented for arrays and 64 bit integers.\n");
@@ -339,9 +346,10 @@ void compile_operation(
         } else if (inner->connective == TYPE_INT) {
             result.flags = OP_64BIT;
         } else {
-            fprintf(stderr, "Error: Currently only arrays of integers or "
-                "other arrays can be indexed.\n");
-            exit(EXIT_FAILURE);
+            /* Not a scalar, so give a pointer instead. TODO: Break this up
+               into some kind of MUL ADD with more steps, to stop relying on
+               reflection to index arrays?? */
+            result.op = OP_ARRAY_OFFSET;
         }
 
         result_type = *val1.type.inner;
@@ -383,7 +391,7 @@ void compile_operation(
     /* if (val1.ref.type == REF_TEMPORARY) destroy_type(&val1.type); */
     /* if (val2.ref.type == REF_TEMPORARY) destroy_type(&val2.type); */
 
-    result.output = push_intermediate(intermediates, result_type);
+    result.output = push_intermediate(intermediates, result_type, false);
 
     buffer_push(*out, result);
 
@@ -447,7 +455,8 @@ void compile_proc_call(
     /* add result */
     buffer_maybe_grow(*intermediates, outputs.count);
     for (int i = 0; i < outputs.count; i++) {
-        push_intermediate(intermediates, outputs.data[i]);
+        /* TODO: What if the outputs are tuples/records? */
+        push_intermediate(intermediates, outputs.data[i], false);
     }
 }
 
@@ -549,7 +558,7 @@ void compile_multivalue_decrements(
 ) {
     while (intermediates->count > 0) {
         struct intermediate it = buffer_pop(*intermediates);
-        if (it.ref.type == REF_TEMPORARY) {
+        if (it.ref.type == REF_TEMPORARY && (it.type.connective == TYPE_ARRAY || it.owns_stack_memory)) {
             compile_variable_decrements(out, it.ref, &it.type);
         }
     }
