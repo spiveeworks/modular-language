@@ -608,7 +608,6 @@ void compile_end_arg(
             struct ref offset_ptr = push_intermediate(intermediates, val.type);
 
             struct instruction *instr = buffer_addn(*out, 1);
-            offset_ptr.x = intermediates->temporaries_count;
             instr->op = OP_ARRAY_OFFSET;
             instr->output = offset_ptr;
             instr->arg1 = pointer_val->ref;
@@ -677,7 +676,7 @@ void compile_end_emplace(
     } else if (em->type == PATTERN_STRUCT) {
         struct intermediate *pointer_val =
             &intermediates->data[em->pointer_intermediate_index];
-        pointer_val->stack_alloc_type = pointer_val->type;
+        pointer_val->alloc_size = pointer_val->type.total_size;
         struct instruction *alloc_instr =
             &out->data[em->alloc_instruction_index];
         alloc_instr->op = OP_STACK_ALLOC;
@@ -820,17 +819,57 @@ void assert_match_pattern(
 
         if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
             if (val.owns_stack_memory) {
-                if (val.stack_alloc_type.total_size == val.type.total_size) {
-                    if (val.ref_offset != 0) {
-                        fprintf(stderr, "Internal error: Pointer offset did "
-                            "not decrease referant size?\n");
+                if (val.type.total_size < val.alloc_size) {
+                    /* A struct literal has been constructed and then indexed
+                       into. We know all the other fields were deinitialized as
+                       we went, so all we need to do now is defragment the
+                       stack a little. */
+                    if (val.ref_offset > 0) {
+                        /* Move the data to the left. */
+                        struct ref offset_ptr = push_intermediate(values, val.type);
+                        struct instruction *instrs = buffer_addn(*out, 2);
+                        instrs[0].op = OP_POINTER_OFFSET;
+                        instrs[0].flags = 0;
+                        instrs[0].output = offset_ptr;
+                        instrs[0].arg1 = val.ref;
+                        instrs[0].arg2.type = REF_CONSTANT;
+                        instrs[0].arg2.x = val.ref_offset;
+
+                        if (val.type.total_size <= val.ref_offset) {
+                            instrs[1].op = OP_POINTER_COPY;
+                        } else {
+                            instrs[1].op = OP_POINTER_COPY_OVERLAPPING;
+                        }
+                        instrs[1].flags = 0;
+                        instrs[1].output = val.ref;
+                        instrs[1].arg1 = offset_ptr;
+                        instrs[1].arg2.type = REF_CONSTANT;
+                        instrs[1].arg2.x = val.type.total_size;
+
+                        pop_intermediate(values);
                     }
-                    /* Steal the memory and use it in-place. */
-                    compile_mov(out, new_var, val.ref, &val.type);
-                } else {
-                    fprintf(stderr, "Error: assignment from fields of struct literals is not yet implemented.\n");
-                    exit(EXIT_FAILURE);
-                }
+                    /* Free the unused part. */
+                    struct ref offset_ptr = push_intermediate(values, type_empty_tuple);
+                    struct instruction *instrs = buffer_addn(*out, 2);
+                    instrs[0].op = OP_POINTER_OFFSET;
+                    instrs[0].flags = 0;
+                    instrs[0].output = offset_ptr;
+                    instrs[0].arg1 = val.ref;
+                    instrs[0].arg2.type = REF_CONSTANT;
+                    instrs[0].arg2.x = val.type.total_size;
+
+                    instrs[1].op = OP_STACK_FREE;
+                    instrs[1].flags = 0;
+                    instrs[1].output.type = REF_NULL;
+                    instrs[1].arg1 = offset_ptr;
+                    instrs[1].arg2.type = REF_NULL;
+
+                    pop_intermediate(values);
+                } /* else steal the memory and use it in-place. */
+
+                /* The memory is where we need it, now we just need to turn the
+                   pointer into a local. */
+                compile_mov(out, new_var, val.ref, &val.type);
             } else {
                 /* Allocate some new memory and copy the value in. */
                 struct instruction *instr = buffer_addn(*out, 1);

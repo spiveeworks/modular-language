@@ -49,11 +49,11 @@ struct operator_info unary_ops = {
 struct intermediate {
     struct ref ref;
     struct type type;
-    struct type stack_alloc_type;
     size_t ref_offset;
     /* bool is_pointer; */
     bool owns_stack_memory;
     bool stack_offset_known;
+    size_t alloc_size;
     size_t temp_stack_offset;
 };
 
@@ -82,7 +82,7 @@ struct ref push_intermediate(struct intermediate_buffer *intermediates, struct t
     struct intermediate *loc = buffer_addn(*intermediates, 1);
     *loc = (struct intermediate){0};
     loc->type = ty;
-    loc->stack_alloc_type = ty;
+    loc->alloc_size = ty.total_size;
     loc->ref = result;
     intermediates->temporaries_count += 1;
 
@@ -271,7 +271,6 @@ struct type compile_store(
         struct ref offset_ptr = push_intermediate(intermediates, val.type);
 
         struct instruction *instr = buffer_addn(*out, 1);
-        offset_ptr.x = intermediates->temporaries_count;
         instr->op = OP_POINTER_OFFSET;
         instr->output = offset_ptr;
         instr->arg1 = to_ptr;
@@ -430,6 +429,7 @@ void compile_struct_member(
     struct intermediate *it = buffer_top(*intermediates);
     struct type *member_ty = NULL;
     size_t offset = it->ref_offset;
+    int64 member_index;
     if (it->type.connective == TYPE_TUPLE) {
         if (member_tk.id != TOKEN_NUMERIC) {
             fprintf(stderr, "Error at line %d, %d: Tried to access the "
@@ -438,16 +438,16 @@ void compile_struct_member(
             fprintf(stderr, "\" in a tuple type.\n");
         }
 
-        int64 value = integer_from_string(member_tk.it);
-        if (value >= it->type.elements.count) {
+        member_index = integer_from_string(member_tk.it);
+        if (member_index >= it->type.elements.count) {
             fprintf(stderr, "Error: Tried to access element %lld of a tuple "
-                "with only %llu elements.\n", value, it->type.elements.count);
+                "with only %llu elements.\n", member_index, it->type.elements.count);
             exit(EXIT_FAILURE);
         }
-        for (int i = 0; i < value; i++) {
+        for (int i = 0; i < member_index; i++) {
             offset += it->type.elements.data[i].total_size;
         }
-        member_ty = &it->type.elements.data[value];
+        member_ty = &it->type.elements.data[member_index];
     } else if (it->type.connective == TYPE_RECORD) {
         fprintf(stderr, "Error: Field access in record types is not yet "
             "implemented.\n");
@@ -487,7 +487,13 @@ void compile_struct_member(
             instrs[0].arg2.x = offset;
 
             /* Destroy and free it */
-            compile_pointer_refcounts(out, it->ref, 0, &it->stack_alloc_type, true);
+            compile_pointer_refcounts(
+                out,
+                it->ref,
+                it->ref_offset,
+                &it->type,
+                true
+            );
             instrs = buffer_addn(*out, 2);
             instrs[0].op = OP_STACK_FREE;
             instrs[0].flags = 0;
@@ -522,6 +528,27 @@ void compile_struct_member(
             instr->arg2.x = offset;
         }
     } else {
+        if (it->owns_stack_memory) {
+            if (it->type.connective == TYPE_TUPLE) {
+                /* We are indexing into a struct literal, deinitialize
+                   everything except this element. */
+                size_t dealloc_offset = it->ref_offset;
+                for (int i = 0; i < it->type.elements.count; i++) {
+                    if (i == member_index) continue;
+
+                    struct type *element_type = &it->type.elements.data[i];
+                    compile_pointer_refcounts(
+                        out,
+                        it->ref,
+                        dealloc_offset, /* offset from it->ref */
+                        element_type,
+                        true /* lower refcounts, rather than increase */
+                    );
+                    dealloc_offset += element_type->total_size;
+                }
+            }
+        }
+
         /* We don't want to load anything yet, and the intermediate buffer can
            take offsets, so just update the offset. */
         it->ref_offset = offset;
@@ -619,7 +646,8 @@ void type_check_return(
 void compile_variable_decrements(
     struct instruction_buffer *out,
     struct ref it,
-    struct type *type
+    struct type *type,
+    size_t ref_offset
 ) {
     if (type->connective == TYPE_ARRAY) {
         struct instruction *instr = buffer_addn(*out, 1);
@@ -629,7 +657,7 @@ void compile_variable_decrements(
         instr->arg1 = it;
         instr->arg2.type = REF_NULL;
     } else if (type->connective == TYPE_TUPLE || type->connective == TYPE_RECORD) {
-        compile_pointer_refcounts(out, it, 0, type, true);
+        compile_pointer_refcounts(out, it, ref_offset, type, true);
 
         struct instruction *instr = buffer_addn(*out, 1);
         instr->op = OP_STACK_FREE;
@@ -650,7 +678,7 @@ void compile_local_decrements(
     for (int64 i = bindings->count - 1; i >= (int64)bindings->global_count; i--) {
         struct record_entry *it = &bindings->data[i];
         struct ref ref = {REF_LOCAL, i - bindings->global_count};
-        compile_variable_decrements(out, ref, &it->type);
+        compile_variable_decrements(out, ref, &it->type, 0);
     }
 }
 
@@ -691,7 +719,7 @@ void compile_multivalue_decrements(
     while (intermediates->count > 0) {
         struct intermediate it = buffer_pop(*intermediates);
         if (it.ref.type == REF_TEMPORARY && (it.type.connective == TYPE_ARRAY || it.owns_stack_memory)) {
-            compile_variable_decrements(out, it.ref, &it.stack_alloc_type);
+            compile_variable_decrements(out, it.ref, &it.type, it.ref_offset);
         }
     }
 }

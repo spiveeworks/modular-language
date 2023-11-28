@@ -19,7 +19,7 @@ pair := triple.1;
 second := (triple.1).0;
 third := triple.1.1;
 
-pair2 := {1, {2, 3}}.1;
+pair2 := {1, {2, 3}, 4}.1;
 
 p2 := {x: 2, y: 3};
 y := p2.y;

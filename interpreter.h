@@ -615,6 +615,15 @@ void continue_execution(
             output_ref.type = REF_NULL;
             break;
           }
+        case OP_POINTER_COPY_OVERLAPPING:
+          {
+            union variable_contents output =
+                read_ref(frame, &stack->vars, output_ref);
+            memmove(output.pointer, arg1_full.pointer, arg2);
+            /* Stop the struct variable from being overwritten. */
+            output_ref.type = REF_NULL;
+            break;
+          }
         case OP_POINTER_LOAD:
           {
             void *data = arg1_full.pointer + arg2;
