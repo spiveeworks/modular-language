@@ -436,12 +436,15 @@ void compile_struct_member(
                 "field \"", member_tk.row, member_tk.column);
             fputstr(member_tk.it, stderr);
             fprintf(stderr, "\" in a tuple type.\n");
+            exit(EXIT_FAILURE);
         }
 
         member_index = integer_from_string(member_tk.it);
         if (member_index >= it->type.elements.count) {
-            fprintf(stderr, "Error: Tried to access element %lld of a tuple "
-                "with only %llu elements.\n", member_index, it->type.elements.count);
+            fprintf(stderr, "Error at line %d, %d: Tried to access element "
+                "%lld of a tuple with only %llu elements.\n",
+                member_tk.row, member_tk.column,
+                member_index, it->type.elements.count);
             exit(EXIT_FAILURE);
         }
         for (int i = 0; i < member_index; i++) {
@@ -449,9 +452,18 @@ void compile_struct_member(
         }
         member_ty = &it->type.elements.data[member_index];
     } else if (it->type.connective == TYPE_RECORD) {
-        fprintf(stderr, "Error: Field access in record types is not yet "
-            "implemented.\n");
-        exit(EXIT_FAILURE);
+        member_index = lookup_name_fields(&it->type.fields, member_tk.it);
+        if (member_index == -1) {
+            fprintf(stderr, "Error at line %d, %d: Tried to access field \"", member_tk.row, member_tk.column);
+            fputstr(member_tk.it, stderr);
+            fprintf(stderr, "\" of a record type that does not have that "
+                "field.\n");
+            exit(EXIT_FAILURE);
+        }
+        for (int i = 0; i < member_index; i++) {
+            offset += it->type.fields.data[i].type.total_size;
+        }
+        member_ty = &it->type.fields.data[member_index].type;
     } else {
         fprintf(stderr, "Error at line %d, %d: Tried to access a member of "
             "something that wasn't a tuple or record type.\n",
@@ -537,6 +549,23 @@ void compile_struct_member(
                     if (i == member_index) continue;
 
                     struct type *element_type = &it->type.elements.data[i];
+                    compile_pointer_refcounts(
+                        out,
+                        it->ref,
+                        dealloc_offset, /* offset from it->ref */
+                        element_type,
+                        true /* lower refcounts, rather than increase */
+                    );
+                    dealloc_offset += element_type->total_size;
+                }
+            } else if (it->type.connective == TYPE_RECORD) {
+                /* We are indexing into a struct literal, deinitialize
+                   everything except this element. */
+                size_t dealloc_offset = it->ref_offset;
+                for (int i = 0; i < it->type.fields.count; i++) {
+                    if (i == member_index) continue;
+
+                    struct type *element_type = &it->type.fields.data[i].type;
                     compile_pointer_refcounts(
                         out,
                         it->ref,

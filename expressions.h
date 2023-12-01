@@ -37,6 +37,7 @@ struct pattern_command {
     bool takes_ref;
 
     struct token tk;
+    struct token identifier; /* For record literals and maybe other things. */
 
     int arg_count;
     size_t arg_command_count;
@@ -100,7 +101,9 @@ enum partial_operation_type {
     PARTIAL_INDEX,
     PARTIAL_PROCEDURE_CALL,
     PARTIAL_ARRAY,
-    PARTIAL_STRUCT,
+    PARTIAL_TUPLE,
+    PARTIAL_RECORD,
+    PARTIAL_FIELD,
 };
 
 /* A pattern_command that is still accumulating inputs. */
@@ -170,12 +173,42 @@ void read_next_ref(
     struct token tk = get_token(tokenizer);
 
     if (tk.id == TOKEN_NUMERIC || tk.id == TOKEN_ALPHANUM) {
-        /* Standard ref position token, emit it and proceed to the cascade
-           part of the loop */
-        struct pattern_command val = {PATTERN_VALUE};
-        val.tk = tk;
-        buffer_push(*out, val);
-        stack->have_next_ref = true;
+        /* In record literals we don't want to interpret names as variables, so
+           peek to see if there is a colon and if it is part of a record
+           literal. This code path will also get activated by type ascriptions
+           in patterns, so we could handle that too one day. */
+        struct token next_tk = get_token(tokenizer);
+        if (next_tk.id == ':') {
+            struct partial_operation *top = buffer_top(stack->lhs);
+            if (top && top->type == PARTIAL_TUPLE) {
+                if (top->arg_count != 0) {
+                    fprintf(stderr, "Error at line %d, %d: Got ':' token inside a "
+                        "tuple expression.\n", next_tk.row, next_tk.column);
+                    exit(EXIT_FAILURE);
+                }
+                top->type = PARTIAL_RECORD;
+            }
+            if (!top || top->type != PARTIAL_RECORD) {
+                fprintf(stderr, "Error at line %d, %d: Got ':' token that wasn't "
+                    "in a record literal or wasn't in the correct location.\n",
+                    next_tk.row, next_tk.column);
+                exit(EXIT_FAILURE);
+            }
+            struct partial_operation new = {PARTIAL_FIELD, PRECEDENCE_GROUPING};
+            new.op = tk; /* TODO: Are there situations where I want to store
+                            two tokens, one for compilation and the other for
+                            error reporting? Well, this is another one of
+                            them. */
+            buffer_push(stack->lhs, new);
+        } else {
+            put_token_back(tokenizer, next_tk);
+            /* Standard ref position token, emit it and proceed to the cascade
+               part of the loop */
+            struct pattern_command val = {PATTERN_VALUE};
+            val.tk = tk;
+            buffer_push(*out, val);
+            stack->have_next_ref = true;
+        }
     } else if (tk.id == '(') {
         /* Nothing to cascade, just push the paren and continue. */
         struct partial_operation new = {PARTIAL_PAREN, PRECEDENCE_GROUPING};
@@ -198,7 +231,7 @@ void read_next_ref(
         buffer_push(*out, command);
     } else if (tk.id == '{') {
         /* Nothing to cascade, just push the brace and continue. */
-        struct partial_operation new = {PARTIAL_STRUCT, PRECEDENCE_GROUPING};
+        struct partial_operation new = {PARTIAL_TUPLE, PRECEDENCE_GROUPING};
         new.op = tk; /* For errors, I guess. */
         new.open_command_index = out->count;
         buffer_push(stack->lhs, new);
@@ -298,17 +331,28 @@ void read_next_op(
     if (stack->opening_id != TOKEN_NULL) stack->grouping_count -= 1;
 }
 
-bool resolve_closing_token(
+void op_stack_resolve_arg(
     struct op_stack *stack,
     struct pattern *out
 ) {
     struct partial_operation *top = buffer_top(stack->lhs);
-    /* Can't pop any more, but have hit a delimiter or comma or
-       something, so handle the closing bracket or try and return a
-       final result or something. */
-    if (stack->closing_token.id == ',') {
-        stack->have_next_ref = false;
-        if (top) {
+    if (top) {
+        if (top->type == PARTIAL_FIELD) {
+            struct pattern_command comma = {PATTERN_END_ARG};
+            comma.tk = stack->closing_token;
+            comma.identifier = top->op;
+            buffer_push(*out, comma);
+
+            buffer_pop(stack->lhs);
+            top = buffer_top(stack->lhs);
+            if (!top) {
+                fprintf(stderr, "Error: Got record partial command that "
+                    "wasn't attached to a struct partial command?\n");
+                exit(EXIT_FAILURE);
+            }
+
+            top->arg_count += 1;
+        } else {
             if (top->precedence != PRECEDENCE_GROUPING) {
                 /* Should be impossible, but check anyway. */
                 fprintf(stderr, "Error: Hit a comma, and tried to "
@@ -330,14 +374,28 @@ bool resolve_closing_token(
             struct pattern_command comma = {PATTERN_END_ARG};
             comma.tk = stack->closing_token;
             buffer_push(*out, comma);
-        } else {
-            struct pattern_command comma = {PATTERN_END_TERM};
-            comma.tk = stack->closing_token;
-            buffer_push(*out, comma);
-            /* Just let the cascaded result exist on the stack. */
-            out->multi_value_count += 1;
         }
+    } else {
+        struct pattern_command comma = {PATTERN_END_TERM};
+        comma.tk = stack->closing_token;
+        buffer_push(*out, comma);
+        /* Just let the cascaded result exist on the stack. */
+        out->multi_value_count += 1;
+    }
+}
 
+bool resolve_closing_token(
+    struct op_stack *stack,
+    struct pattern *out
+) {
+    struct partial_operation *top = buffer_top(stack->lhs);
+    /* Can't pop any more, but have hit a delimiter or comma or
+       something, so handle the closing bracket or try and return a
+       final result or something. */
+    if (stack->closing_token.id == ',') {
+        op_stack_resolve_arg(stack, out);
+
+        stack->have_next_ref = false;
         stack->have_closing_token = false;
     } else if (stack->opening_id == TOKEN_NULL) {
         if (top) {
@@ -358,7 +416,13 @@ bool resolve_closing_token(
         fputstr(stack->closing_token.it, stderr);
         fprintf(stderr, "\" while parsing expression.\n");
         exit(EXIT_FAILURE);
-    } else if (stack->opening_id != top->op.id) {
+    } else if (top->type == PARTIAL_FIELD && stack->opening_id != '{') {
+        fprintf(stderr, "Error on line %d, %d: Got incorrectly "
+                "matched brackets \"{\" and \"%c\" while parsing "
+                "expression.", stack->closing_token.row,
+                stack->closing_token.column, stack->closing_token.id);
+        exit(EXIT_FAILURE);
+    } else if (top->type != PARTIAL_FIELD && stack->opening_id != top->op.id) {
         fprintf(stderr, "Error on line %d, %d: Got incorrectly "
                 "matched brackets \"%c\" and \"%c\" while parsing "
                 "expression.", stack->closing_token.row,
@@ -392,16 +456,15 @@ bool resolve_closing_token(
         /* Keep have_next_ref, for the subexpression that we just build. */
     } else {
         /* Push one last comma, as if it were written manually. */
-        top->arg_count += 1;
-
-        struct pattern_command comma = {PATTERN_END_ARG};
-        buffer_push(*out, comma);
+        op_stack_resolve_arg(stack, out);
+        /* This still exists, op_stack_resolve_arg checked so. */
+        top = buffer_top(stack->lhs);
 
         struct pattern_command *open =
             &out->data[top->open_command_index];
         open->arg_count = top->arg_count;
         open->arg_command_count =
-            stack->lhs.count - top->open_command_index - 1;
+            out->count - top->open_command_index - 1;
 
         /* Whatever just happened, it gave us an expression, that might fill
            further holes on the left or the right. */
@@ -625,21 +688,51 @@ void compile_end_arg(
     } else if (em->type == PATTERN_STRUCT) {
         struct intermediate *pointer_val =
             &intermediates->data[em->pointer_intermediate_index];
-        if (pointer_val->type.connective == TYPE_RECORD) {
-            fprintf(stderr, "Error: Got bare tuple element in a record type.\n");
-            exit(EXIT_FAILURE);
-        }
-        if (pointer_val->type.connective != TYPE_TUPLE) {
-            fprintf(stderr, "Error: Tried compiling tuple emplace command to "
-                "an output that wasn't a tuple?\n");
-            exit(EXIT_FAILURE);
-        }
+        if (c->identifier.id != TOKEN_NULL) {
+            /* Emplace arg with an identifier, build a record type. */
+            if (pointer_val->type.connective == TYPE_TUPLE) {
+                if (pointer_val->type.elements.count == 0) {
+                    /* No point freeing the elements list, since clearly
+                       nothing has been pushed to it yet. */
+                    pointer_val->type = type_empty_record;
+                } else {
+                    fprintf(stderr, "Error: Got record element in a tuple "
+                        "type.\n");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            if (pointer_val->type.connective != TYPE_RECORD) {
+                fprintf(stderr, "Error: Tried compiling record emplace "
+                    "command to an output that wasn't a record?\n");
+                exit(EXIT_FAILURE);
+            }
 
-        size_t offset = pointer_val->type.total_size;
-        struct type val_type = compile_store(out, pointer_val->ref, offset, intermediates);
+            size_t offset = pointer_val->type.total_size;
+            struct type val_type = compile_store(out, pointer_val->ref, offset, intermediates);
 
-        pointer_val->type.total_size += val_type.total_size;
-        buffer_push(pointer_val->type.elements, val_type);
+            pointer_val->type.total_size += val_type.total_size;
+
+            struct record_entry *new = buffer_addn(pointer_val->type.fields, 1);
+            new->name = c->identifier.it;
+            new->type = val_type;
+        } else {
+            /* No identifier attached to the arg, build a tuple literal. */
+            if (pointer_val->type.connective == TYPE_RECORD) {
+                fprintf(stderr, "Error: Got bare tuple element in a record type.\n");
+                exit(EXIT_FAILURE);
+            }
+            if (pointer_val->type.connective != TYPE_TUPLE) {
+                fprintf(stderr, "Error: Tried compiling tuple emplace command to "
+                    "an output that wasn't a tuple?\n");
+                exit(EXIT_FAILURE);
+            }
+
+            size_t offset = pointer_val->type.total_size;
+            struct type val_type = compile_store(out, pointer_val->ref, offset, intermediates);
+
+            pointer_val->type.total_size += val_type.total_size;
+            buffer_push(pointer_val->type.elements, val_type);
+        }
     } else {
         fprintf(stderr, "Error at line %d, %d: Multi-value "
             "encountered with unknown emplace type %d.\n",

@@ -28,6 +28,12 @@ ps := [p2, {x: 4, y: 5}];
 
 ps2 := ps ++ [{x: 5, y: 6}];
 
+thing := {x: 1, y: [2, 3], z: [{4, 5}, {6, 7}]};
+
+function my_function(x: Int, y: Int, z: Int) := x + y + z;
+
+function_result := my_function(thing.x, thing.y[0], thing.z[1].0);
+
 function f(p1: tuple{Int, Int}, p2: record{x: Int, y: Int}) -> Int {
     dx := p2.x - p1.1;
     dy := p2.y - p1.0;

@@ -99,6 +99,19 @@ void print_data(uint8 *it, struct type *type) {
             it += elem_ty->total_size;
         }
         printf("}");
+    } else if (type->connective == TYPE_RECORD) {
+        printf("{");
+        for (int i = 0; i < type->fields.count; i++) {
+            if (i > 0) printf(", ");
+            struct record_entry *field = &type->fields.data[i];
+            fputstr(field->name, stdout);
+            printf(": ");
+            print_data(it, &field->type);
+            it += field->type.total_size;
+        }
+        printf("}");
+    } else {
+        printf("?");
     }
 }
 

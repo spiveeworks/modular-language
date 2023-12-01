@@ -191,6 +191,13 @@ const struct type type_empty_tuple = {
     .total_size = 0
 };
 
+/* Not sure whether this distinct type will exist from the user's perspective,
+   but this is still a useful starting point for building record types. */
+const struct type type_empty_record = {
+    .connective = TYPE_RECORD,
+    .total_size = 0
+};
+
 /* TODO: work out a memory arena or reference counting or something to make
    these types safe to copy. */
 struct type type_array_of(struct type entry_type) {
@@ -235,6 +242,13 @@ int lookup_name(struct record_table *table, str name) {
     return -1;
 }
 
+int lookup_name_fields(struct field_record_table *table, str name) {
+    for (int i = table->count - 1; i >= 0; i--) {
+        if (str_eq(name, table->data[i].name)) return i;
+    }
+    return -1;
+}
+
 /*****************/
 /* Type Checking */
 /*****************/
@@ -254,12 +268,25 @@ bool type_eq(struct type *a, struct type *b) {
     case TYPE_FLOAT:
         return a->word_size == b->word_size;
     case TYPE_TUPLE:
-        fprintf(stderr, "Warning: Tuple type checking is not yet "
-            "implemented.\n");
+        if (a->elements.count != b->elements.count) return false;
+        for (int i = 0; i < a->elements.count; i++) {
+            if (!type_eq(&a->elements.data[i], &b->elements.data[i])) {
+                return false;
+            }
+        }
         return true;
     case TYPE_RECORD:
-        fprintf(stderr, "Warning: Record type checking is not yet "
-            "implemented.\n");
+        if (a->fields.count != b->fields.count) return false;
+        for (int i = 0; i < a->fields.count; i++) {
+            struct record_entry *a_entry = &a->fields.data[i];
+            struct record_entry *b_entry = &b->fields.data[i];
+            if (!str_eq(a_entry->name, b_entry->name)) {
+                return false;
+            }
+            if (!type_eq(&a_entry->type, &b_entry->type)) {
+                return false;
+            }
+        }
         return true;
     case TYPE_ARRAY:
         return type_eq(a->inner, b->inner);
