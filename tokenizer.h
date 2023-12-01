@@ -25,7 +25,7 @@ struct tokenizer {
 
 struct tokenizer start_tokenizer(FILE *input) {
     /* Make sure to start on line 1! */
-    return (struct tokenizer){input, 1, 0};
+    return (struct tokenizer){input, 1, 1};
 }
 
 void tokenizer_read_input(struct tokenizer *tk) {
@@ -121,7 +121,7 @@ bool tokenizer_try_read_eol(struct tokenizer *tk) {
             tk->blob_chars_read += 1;
 
             tk->row += 1;
-            tk->column = 0;
+            tk->column = 1;
 
             if (tokenizer_peek_char(tk) == '\n') {
                 tk->blob_chars_read += 1;
@@ -134,7 +134,7 @@ bool tokenizer_try_read_eol(struct tokenizer *tk) {
             tk->blob_chars_read += 1;
 
             tk->row += 1;
-            tk->column = 0;
+            tk->column = 1;
 
             return true;
         }
