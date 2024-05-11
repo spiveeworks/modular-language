@@ -494,8 +494,10 @@ void continue_execution(
             new.start = procedures.data[arg1].instructions.data;
             new.count = procedures.data[arg1].instructions.count;
             new.current = 0;
-            new.locals_start = stack->vars.count - arg2;
-            new.locals_count = arg2;
+            new.locals_start = frame->locals_start + arg2;
+            // This is not really correct, but this whole concept of VM locals
+            // is kind of nonsense anyway.
+            new.locals_count = stack->vars.count - new.locals_start;
             if (next->arg1.type == REF_TEMPORARY) {
                 new.results_start = new.locals_start - 1;
             } else {
@@ -509,10 +511,10 @@ void continue_execution(
         case OP_RET:
         {
             /* Unbind all variables that aren't being returned. */
-            int source_offset = stack->vars.count - arg1;
+            int source_offset = frame->locals_start + arg1;
             int dest_offset = frame->results_start;
             /* Move results up the stack, to where the inputs were. */
-            for (int i = 0; i < arg1; i++) {
+            for (int i = 0; i < arg2; i++) {
                 stack->vars.data[dest_offset + i] =
                     stack->vars.data[source_offset + i];
             }

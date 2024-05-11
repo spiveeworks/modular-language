@@ -587,6 +587,7 @@ void compile_struct_member(
 
 void compile_proc_call(
     struct instruction_buffer *out,
+    int local_count,
     struct intermediate_buffer *intermediates,
     int arg_count
 ) {
@@ -630,7 +631,7 @@ void compile_proc_call(
     }
 
     instr.arg2.type = REF_CONSTANT;
-    instr.arg2.x = arg_count;
+    instr.arg2.x = local_count + proc_index;
 
     buffer_push(*out, instr);
 
@@ -704,9 +705,10 @@ void compile_local_decrements(
     struct instruction_buffer *out,
     struct record_table *bindings
 ) {
-    for (int64 i = bindings->count - 1; i >= (int64)bindings->global_count; i--) {
-        struct record_entry *it = &bindings->data[i];
-        struct ref ref = {REF_LOCAL, i - bindings->global_count};
+    int64 local_count = bindings->count - bindings->global_count;
+    for (int64 i = local_count - 1; i >= 0; i--) {
+        struct record_entry *it = &bindings->data[bindings->global_count + i];
+        struct ref ref = {REF_LOCAL, i};
         compile_variable_decrements(out, ref, &it->type, 0);
     }
 }
@@ -737,8 +739,9 @@ void compile_return(
     instr->flags = 0;
     instr->output.type = REF_NULL;
     instr->arg1.type = REF_CONSTANT;
-    instr->arg1.x = val_count;
-    instr->arg2.type = REF_NULL;
+    instr->arg1.x = bindings->count - bindings->global_count;
+    instr->arg2.type = REF_CONSTANT;
+    instr->arg2.x = val_count;
 }
 
 void compile_multivalue_decrements(

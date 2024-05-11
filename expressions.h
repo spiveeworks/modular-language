@@ -744,6 +744,7 @@ void compile_end_arg(
 
 void compile_end_emplace(
     struct instruction_buffer *out,
+    int local_count,
     struct intermediate_buffer *intermediates,
     struct emplace_info *em,
     struct pattern_command *c
@@ -751,6 +752,7 @@ void compile_end_emplace(
     if (em->type == PATTERN_PROCEDURE_CALL) {
         compile_proc_call(
             out,
+            local_count,
             intermediates,
             em->args_total
         );
@@ -843,7 +845,8 @@ struct intermediate_buffer compile_expression(
             compile_end_arg(out, &intermediates, em, c);
             em->args_handled += 1;
             if (em->args_handled >= em->args_total) {
-                compile_end_emplace(out, &intermediates, em, c);
+                int local_count = bindings->count - bindings->global_count;
+                compile_end_emplace(out, local_count, &intermediates, em, c);
                 emplace_stack.count -= 1;
             }
         } else {
