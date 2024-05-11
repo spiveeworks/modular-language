@@ -34,7 +34,7 @@ function my_function(x: Int, y: Int, z: Int) := x + y + z;
 
 function_result := my_function(thing.x, thing.y[0], thing.z[1].0);
 
-function f(p1: tuple{Int, Int}, p2: record{x: Int, y: Int}) -> Int {
+function f(p1: {Int, Int}, p2: {x: Int, y: Int}) -> Int {
     dx := p2.x - p1.1;
     dy := p2.y - p1.0;
     return dx * dx + dy * dy;

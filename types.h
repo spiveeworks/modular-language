@@ -141,6 +141,8 @@ struct record_table {
     size_t capacity;
 
     size_t global_count;
+    size_t arg_count;
+    /* local count (including args) = count - global_count */
 };
 
 /* TODO: What should these two structs actually be called? */

@@ -113,6 +113,16 @@ struct intermediate_buffer parse_statement(
 /* Procedures */
 /**************/
 
+struct type parse_type_name(struct token tk) {
+    if (!str_eq(tk.it, from_cstr("Int"))) {
+        fprintf(stderr, "Error at line %d, %d: Currently only Int, array, "
+            "tuple, and record parameters are supported.\n", tk.row, tk.column);
+        exit(EXIT_FAILURE);
+    }
+
+    return type_int64;
+}
+
 struct type parse_type(struct tokenizer *tokenizer) {
     struct token tk = get_token(tokenizer);
 
@@ -132,6 +142,81 @@ struct type parse_type(struct tokenizer *tokenizer) {
         return result;
     }
     /* else */
+    if (tk.id == '{') {
+        bool got_element = false;
+        struct type result = {0};
+        while (true) {
+            tk = get_token(tokenizer);
+            if (tk.id == '}') break;
+
+            if (tk.id == TOKEN_ALPHANUM) {
+                struct token name_tk = tk;
+
+                tk = get_token(tokenizer);
+                if (tk.id == ':') {
+                    if (got_element && result.connective != TYPE_RECORD) {
+                        fprintf(stderr, "Error at line %d, %d: Cannot mix anonymous elements with named fields in a single tuple/record type.", tk.row, tk.column);
+                        exit(EXIT_FAILURE);
+                    }
+                    struct type ty = parse_type(tokenizer);
+
+                    result.connective = TYPE_RECORD;
+                    got_element = true;
+
+                    struct record_entry *new = buffer_addn(result.fields, 1);
+                    new->name = name_tk.it;
+                    new->type = ty;
+                } else {
+                    if (got_element && result.connective != TYPE_TUPLE) {
+                        fprintf(stderr, "Error at line %d, %d: Cannot mix anonymous elements with named fields in a single tuple/record type.", tk.row, tk.column);
+                        exit(EXIT_FAILURE);
+                    }
+                    struct type ty = parse_type_name(name_tk);
+
+                    result.connective = TYPE_TUPLE;
+                    got_element = true;
+
+                    buffer_push(result.elements, ty);
+
+                    put_token_back(tokenizer, tk);
+                }
+            } else {
+                if (got_element && result.connective != TYPE_TUPLE) {
+                    fprintf(stderr, "Error at line %d, %d: Cannot mix anonymous elements with named fields in a single tuple/record type.", tk.row, tk.column);
+                    exit(EXIT_FAILURE);
+                }
+
+                put_token_back(tokenizer, tk);
+                struct type ty = parse_type(tokenizer);
+
+                result.connective = TYPE_TUPLE;
+                got_element = true;
+
+                buffer_push(result.elements, ty);
+            }
+
+            tk = get_token(tokenizer);
+            if (tk.id == '}') break;
+
+            if (tk.id != ',') {
+                if (got_element && result.connective == TYPE_RECORD) {
+                    fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
+                        tk.row, tk.column);
+                    fputstr(tk.it, stderr);
+                    fprintf(stderr, "\" in record type.\n");
+                    exit(EXIT_FAILURE);
+                } else {
+                    fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
+                        tk.row, tk.column);
+                    fputstr(tk.it, stderr);
+                    fprintf(stderr, "\" in record type.\n");
+                    exit(EXIT_FAILURE);
+                }
+            }
+        }
+
+        return result;
+    }
 
     if (tk.id != TOKEN_ALPHANUM) {
         fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
@@ -141,12 +226,7 @@ struct type parse_type(struct tokenizer *tokenizer) {
         exit(EXIT_FAILURE);
     }
 
-    if (!str_eq(tk.it, from_cstr("Int"))) {
-        fprintf(stderr, "Error at line %d, %d: Currently only Int and array "
-            "parameters are supported.\n", tk.row, tk.column);
-        exit(EXIT_FAILURE);
-    }
-    return type_int64;
+    return parse_type_name(tk);
 }
 
 struct record_entry parse_procedure(
@@ -217,6 +297,7 @@ struct record_entry parse_procedure(
             exit(EXIT_FAILURE);
         }
     }
+    bindings->arg_count = bindings->count - bindings->global_count;
 
     tk = get_token(tokenizer);
 

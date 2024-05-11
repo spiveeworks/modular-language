@@ -677,7 +677,8 @@ void compile_variable_decrements(
     struct instruction_buffer *out,
     struct ref it,
     struct type *type,
-    size_t ref_offset
+    size_t ref_offset,
+    bool free_data_stack
 ) {
     if (type->connective == TYPE_ARRAY) {
         struct instruction *instr = buffer_addn(*out, 1);
@@ -689,12 +690,14 @@ void compile_variable_decrements(
     } else if (type->connective == TYPE_TUPLE || type->connective == TYPE_RECORD) {
         compile_pointer_refcounts(out, it, ref_offset, type, true);
 
-        struct instruction *instr = buffer_addn(*out, 1);
-        instr->op = OP_STACK_FREE;
-        instr->flags = 0;
-        instr->output.type = REF_NULL;
-        instr->arg1 = it;
-        instr->arg2.type = REF_NULL;
+        if (free_data_stack) {
+            struct instruction *instr = buffer_addn(*out, 1);
+            instr->op = OP_STACK_FREE;
+            instr->flags = 0;
+            instr->output.type = REF_NULL;
+            instr->arg1 = it;
+            instr->arg2.type = REF_NULL;
+        }
     } else if (type->connective != TYPE_INT) {
         fprintf(stderr, "Warning: Unknown type will be put on the stack, it "
             "may leak memory.\n");
@@ -709,7 +712,9 @@ void compile_local_decrements(
     for (int64 i = local_count - 1; i >= 0; i--) {
         struct record_entry *it = &bindings->data[bindings->global_count + i];
         struct ref ref = {REF_LOCAL, i};
-        compile_variable_decrements(out, ref, &it->type, 0);
+        bool is_arg = i < bindings->arg_count;
+        /* TODO: Combine all of the stack free operations into one? */
+        compile_variable_decrements(out, ref, &it->type, 0, !is_arg);
     }
 }
 
@@ -751,7 +756,8 @@ void compile_multivalue_decrements(
     while (intermediates->count > 0) {
         struct intermediate it = buffer_pop(*intermediates);
         if (it.ref.type == REF_TEMPORARY && (it.type.connective == TYPE_ARRAY || it.owns_stack_memory)) {
-            compile_variable_decrements(out, it.ref, &it.type, it.ref_offset);
+            /* TODO: Combine all of the stack free operations into one? */
+            compile_variable_decrements(out, it.ref, &it.type, it.ref_offset, true);
         }
     }
 }
