@@ -78,7 +78,7 @@ void shared_buff_decrement(struct shared_buff_header *ptr);
    whole array multiple times, once for each offset where an array sits. This
    performs best for structs with no arrays in them or just one array in them,
    but probably still does well with two or three arrays. */
-do_decrements(uint8 *data, struct type *type, int count, size_t stride) {
+void do_decrements(uint8 *data, struct type *type, int count, size_t stride) {
     if (type->connective == TYPE_ARRAY) {
         for (int i = 0; i < count; i++) {
             struct shared_buff *buff = (struct shared_buff*)data;
@@ -95,6 +95,35 @@ do_decrements(uint8 *data, struct type *type, int count, size_t stride) {
         for (int i = 0; i < type->fields.count; i++) {
             struct type *elem_type = &type->fields.data[i].type;
             do_decrements(data, elem_type, count, stride);
+            data += elem_type->total_size;
+        }
+    } else if (type->connective != TYPE_INT) {
+        fprintf(stderr, "Warning: Got an unknown type connective, leaking.\n");
+    }
+}
+
+/* Copy of do_decrements that increments instead. I think this will work. */
+void do_increments(uint8 *data, struct type *type, int count, size_t stride) {
+    if (type->connective == TYPE_ARRAY) {
+        struct shared_buff *buffs = (struct shared_buff*)data;
+        for (int i = 0; i < count; i++) {
+            struct shared_buff_header *header = buffs[i].ptr;
+            if (header) header->references += 1;
+            if (debug) {
+                print_ref_count(header);
+                printf("count is %d\n", buffs[i].count);
+            }
+        }
+    } else if (type->connective == TYPE_TUPLE) {
+        for (int i = 0; i < type->elements.count; i++) {
+            struct type *elem_type = &type->elements.data[i];
+            do_increments(data, elem_type, count, stride);
+            data += elem_type->total_size;
+        }
+    } else if (type->connective == TYPE_RECORD) {
+        for (int i = 0; i < type->fields.count; i++) {
+            struct type *elem_type = &type->fields.data[i].type;
+            do_increments(data, elem_type, count, stride);
             data += elem_type->total_size;
         }
     } else if (type->connective != TYPE_INT) {
@@ -134,19 +163,7 @@ void *shared_buff_get_index(struct shared_buff buff, int index) {
 
 void copy_vals(struct type *element_type, void *dest, void *source, int count) {
     memcpy(dest, source, count * element_type->total_size);
-    if (element_type->connective == TYPE_ARRAY) {
-        struct shared_buff *buffs = source;
-        for (int i = 0; i < count; i++) {
-            struct shared_buff_header *header = buffs[i].ptr;
-            if (header) header->references += 1;
-            if (debug) {
-                print_ref_count(header);
-                printf("count is %d\n", buffs[i].count);
-            }
-        }
-    } else if (element_type->connective != TYPE_INT) {
-        fprintf(stderr, "Error: Copying aggregate data is not yet implemented.\n");
-    }
+    do_increments(source, element_type, count, element_type->total_size);
 }
 
 void copy_scalar(
@@ -536,7 +553,7 @@ void continue_execution(
             uint8 *data = shared_buff_get_index(arg1_full.shared_buff, arg2);
             struct type *element_type = arg1_full.shared_buff.ptr->element_type;
             if (element_type->total_size > 16) {
-                fprintf(stderr, "Error: Arrays of structs are not implemented.\n");
+                fprintf(stderr, "Error: Tried to read a scalar from an array of structs.\n");
                 exit(EXIT_FAILURE);
             }
             copy_scalar(result.bytes, data, next->flags, false);

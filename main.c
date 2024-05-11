@@ -57,6 +57,22 @@ void disassemble_instructions(struct instruction_buffer instructions) {
             printf("] = ");
             print_ref(instr->arg2);
             printf("\n");
+        } else if (instr->op == OP_POINTER_STORE) {
+            printf("*(");
+            print_ref(instr->output);
+            printf(" +");
+            print_ref(instr->arg1);
+            printf(") = ");
+            print_ref(instr->arg2);
+            printf("\n");
+        } else if (instr->op == OP_POINTER_COPY) {
+            printf("*");
+            print_ref(instr->output);
+            printf(" = *");
+            print_ref(instr->arg1);
+            printf("  // size = ");
+            print_ref(instr->arg2);
+            printf("\n");
         } else {
             if (instr->output.type != REF_NULL) {
                 print_ref(instr->output);
