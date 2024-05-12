@@ -106,7 +106,7 @@ struct intermediate_buffer parse_statement(
     }
 
     /* Returned or assigned results or something, return nothing. */
-    return (struct intermediate_buffer){0};
+    return intermediates_start(bindings);
 }
 
 /**************/
@@ -379,7 +379,7 @@ struct record_entry parse_procedure(
 
         if (!have_returned) {
             if (output_types.count == 0) {
-                struct intermediate_buffer intermediates = {0};
+                struct intermediate_buffer intermediates = intermediates_start(bindings);
                 compile_return(out, bindings, &intermediates);
             } else {
                 fprintf(stderr, "Error at line %d, %d: The function \"",

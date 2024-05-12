@@ -795,7 +795,7 @@ struct intermediate_buffer compile_expression(
     struct record_table *bindings,
     struct pattern *in
 ) {
-    struct intermediate_buffer intermediates = {0};
+    struct intermediate_buffer intermediates = intermediates_start(bindings);
     struct emplace_stack emplace_stack = {0};
 
     for (int i = 0; i < in->count; i++) {

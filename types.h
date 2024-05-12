@@ -383,6 +383,9 @@ enum ref_type {
     REF_STATIC_POINTER, /* Does this actually need to be different? */
     REF_GLOBAL,
     REF_LOCAL,
+    /* This uses the same indices as REF_LOCAL, but some instructions behave
+       differently when given REF_TEMPORARY refs. A better name might be
+       REF_MOVE or something. */
     REF_TEMPORARY,
 };
 

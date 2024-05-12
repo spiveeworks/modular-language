@@ -202,7 +202,6 @@ struct execution_frame {
 
     /* Stack offset where function args/locals start for this frame. */
     size_t locals_start;
-    size_t locals_count;
     /* Stack offset where function results should be written to. Usually this
        is equal to locals_start. */
     size_t results_start;
@@ -309,7 +308,6 @@ void call_stack_push_exec_frame(
     frame->current = 0;
 
     frame->locals_start = stack->vars.global_count;
-    frame->locals_count = 0;
     frame->results_start = stack->vars.count;
 }
 
@@ -333,10 +331,8 @@ union variable_contents read_ref(
         index = ref.x;
         break;
     case REF_LOCAL:
-        index = frame->locals_start + ref.x;
-        break;
     case REF_TEMPORARY:
-        index = frame->locals_start + frame->locals_count + ref.x;
+        index = frame->locals_start + ref.x;
         break;
     default:
         fprintf(stderr, "Unexpected ref.type value %d?\n", ref.type);
@@ -364,10 +360,8 @@ void write_ref(
         index = ref.x;
         break;
     case REF_LOCAL:
-        index = frame->locals_start + ref.x;
-        break;
     case REF_TEMPORARY:
-        index = frame->locals_start + frame->locals_count + ref.x;
+        index = frame->locals_start + ref.x;
         break;
     default:
         fprintf(stderr, "Unexpected ref.type value %d?\n", ref.type);
@@ -495,9 +489,6 @@ void continue_execution(
             new.count = procedures.data[arg1].instructions.count;
             new.current = 0;
             new.locals_start = frame->locals_start + arg2;
-            // This is not really correct, but this whole concept of VM locals
-            // is kind of nonsense anyway.
-            new.locals_count = stack->vars.count - new.locals_start;
             if (next->arg1.type == REF_TEMPORARY) {
                 new.results_start = new.locals_start - 1;
             } else {
@@ -677,11 +668,7 @@ void continue_execution(
 
         write_ref(frame, &stack->vars, output_ref, result);
 
-        if (next->output.type == REF_LOCAL
-            && next->output.x >= frame->locals_count)
-        {
-            frame->locals_count = next->output.x + 1;
-        } else if (next->output.type == REF_GLOBAL
+        if (next->output.type == REF_GLOBAL
             && next->output.x >= stack->vars.global_count)
         {
             stack->vars.global_count = next->output.x + 1;

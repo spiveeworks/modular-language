@@ -150,7 +150,7 @@ void print_multi_expression(
         /* Kinda hacky, just reuse the interpreter's read_ref function,
            but with a bogus execution frame representing the fact that
            there are no local variables. */
-        struct execution_frame frame = {.locals_count = vars->global_count};
+        struct execution_frame frame = {0};
         union variable_contents val = read_ref(&frame, vars, it->ref);
         val.pointer += it->ref_offset;
         print_call_stack_value(val, &it->type);

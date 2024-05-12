@@ -61,14 +61,21 @@ struct intermediate_buffer {
     struct intermediate *data;
     size_t count;
     size_t capacity;
-    size_t temporaries_count;
+    /* We could store the first temporary index and the number, but this is all
+       we actually need for allocating temporaries. */
+    size_t next_local_index;
 };
+
+struct intermediate_buffer intermediates_start(struct record_table *bindings) {
+    size_t local_count = bindings->count - bindings->global_count;
+    return (struct intermediate_buffer){.next_local_index = local_count};
+}
 
 struct intermediate pop_intermediate(struct intermediate_buffer *intermediates) {
     struct intermediate result = buffer_pop(*intermediates);
 
     if (result.ref.type == REF_TEMPORARY) {
-        intermediates->temporaries_count -= 1;
+        intermediates->next_local_index -= 1;
     }
 
     return result;
@@ -77,14 +84,14 @@ struct intermediate pop_intermediate(struct intermediate_buffer *intermediates) 
 struct ref push_intermediate(struct intermediate_buffer *intermediates, struct type ty) {
     struct ref result;
     result.type = REF_TEMPORARY;
-    result.x = intermediates->temporaries_count;
+    result.x = intermediates->next_local_index;
 
     struct intermediate *loc = buffer_addn(*intermediates, 1);
     *loc = (struct intermediate){0};
     loc->type = ty;
     loc->alloc_size = ty.total_size;
     loc->ref = result;
-    intermediates->temporaries_count += 1;
+    intermediates->next_local_index += 1;
 
     return result;
 }
@@ -305,10 +312,10 @@ void compile_push(
     }
     struct intermediate *val = buffer_top(*intermediates);
     if (val->ref.type != REF_TEMPORARY) {
-        struct ref to = {REF_TEMPORARY, intermediates->temporaries_count};
+        struct ref to = {REF_TEMPORARY, intermediates->next_local_index};
         compile_mov(out, to, val->ref, &val->type);
         val->ref = to;
-        intermediates->temporaries_count += 1;
+        intermediates->next_local_index += 1;
     }
 }
 
@@ -637,7 +644,7 @@ void compile_proc_call(
 
     /* discard args */
     intermediates->count -= arg_count;
-    intermediates->temporaries_count -= arg_count;
+    intermediates->next_local_index -= arg_count;
     /* discard proc */
     pop_intermediate(intermediates);
 
