@@ -358,6 +358,7 @@ enum operation {
     OP_POINTER_OFFSET, /* Like add, but don't discard arg1. */
     OP_POINTER_STORE,
     OP_POINTER_COPY,
+    OP_POINTER_DUP, /* Combined stack alloc and copy, useful for reading temp pointers. */
     OP_POINTER_COPY_OVERLAPPING,
     OP_POINTER_LOAD,
     OP_POINTER_INCREMENT_REFCOUNT,

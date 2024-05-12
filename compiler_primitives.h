@@ -203,7 +203,8 @@ void compile_copy(
     struct instruction_buffer *out,
     struct intermediate_buffer *intermediates,
     struct ref to_ptr,
-    struct intermediate *from_ptr
+    struct intermediate *from_ptr,
+    bool allocate_output
 ) {
     struct ref from_ptr_offset = from_ptr->ref;
     bool pushed_new = false;
@@ -226,7 +227,8 @@ void compile_copy(
     }
 
     struct instruction *instr = buffer_addn(*out, 1);
-    instr->op = OP_POINTER_COPY;
+    if (allocate_output) instr->op = OP_POINTER_DUP;
+    else instr->op = OP_POINTER_COPY;
     instr->output = to_ptr;
     instr->arg1 = from_ptr_offset;
     instr->arg2.type = REF_CONSTANT;
@@ -284,7 +286,7 @@ struct type compile_store(
         instr->arg2.type = REF_CONSTANT;
         instr->arg2.x = offset;
 
-        compile_copy(out, intermediates, offset_ptr, &val);
+        compile_copy(out, intermediates, offset_ptr, &val, false);
 
         pop_intermediate(intermediates);
     } else {

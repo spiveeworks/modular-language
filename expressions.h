@@ -677,7 +677,7 @@ void compile_end_arg(
             instr->arg2.type = REF_CONSTANT;
             instr->arg2.x = em->args_handled;
 
-            compile_copy(out, intermediates, offset_ptr, &val);
+            compile_copy(out, intermediates, offset_ptr, &val, false);
             pop_intermediate(intermediates);
         }
         /* Pop after, now that we have finished making and using our own
@@ -968,18 +968,9 @@ void assert_match_pattern(
                 compile_mov(out, new_var, val.ref, &val.type);
             } else {
                 /* Allocate some new memory and copy the value in. */
-                struct instruction *instr = buffer_addn(*out, 1);
-                instr->op = OP_STACK_ALLOC;
-                instr->flags = 0;
-                instr->output = new_var;
-                instr->arg1.type = REF_CONSTANT;
-                instr->arg1.x = (int64)val.type.total_size;
-                instr->arg2.type = REF_NULL;
-                instr->arg2.x = 0;
-
                 /* Is it okay to pass values into this thing as our
                    intermediate buffer? */
-                compile_copy(out, values, new_var, &val);
+                compile_copy(out, values, new_var, &val, true);
             }
         } else {
             compile_mov(out, new_var, val.ref, &val.type);

@@ -625,6 +625,12 @@ void continue_execution(
             output_ref.type = REF_NULL;
             break;
           }
+        case OP_POINTER_DUP:
+          {
+            result.pointer = stack_alloc(&stack->data, arg2);
+            memcpy(result.pointer, arg1_full.pointer, arg2);
+            break;
+          }
         case OP_POINTER_COPY_OVERLAPPING:
           {
             union variable_contents output =
