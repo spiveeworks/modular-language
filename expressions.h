@@ -646,13 +646,18 @@ void compile_begin_emplace(
             output_bytes = 8;
         }
         if (output_bytes > 0) {
-            if (proc_val->ref.type != REF_GLOBAL) {
-                fprintf(stderr, "Error: Anonymous functions with struct inputs/outputs require tricky allocations and are not yet implemented.\n");
-                exit(EXIT_FAILURE);
-            }
-
             struct ref temp_memory = {REF_TEMPORARY, intermediates->next_local_index};
             intermediates->next_local_index += 1;
+
+            if (proc_val->ref.type == REF_TEMPORARY && proc_val->ref.x == temp_memory.x - 1) {
+                /* Our naive allocation of a temp memory register is in the way
+                   of the procedure handle itself, so move the procedure
+                   forward, and use the old spot for the memory register
+                   instead. */
+                compile_mov(out, temp_memory, proc_val->ref, &proc_val->type);
+                proc_val->ref.x += 1;
+                temp_memory.x -= 1;
+            }
 
             struct instruction *alloc_instr = buffer_addn(*out, 1);
             alloc_instr->op = OP_STACK_ALLOC;
@@ -710,7 +715,9 @@ void compile_end_arg(
                 exit(EXIT_FAILURE);
             }
         }
-        if (val.type.connective == TYPE_INT) {
+        if (val.type.connective == TYPE_INT || val.type.connective == TYPE_PROCEDURE) {
+            /* TODO: Make procedures have enclosed state, and handle that
+               appropriately. */
             struct instruction instr;
             instr.op = OP_ARRAY_STORE;
             instr.flags = OP_64BIT;

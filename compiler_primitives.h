@@ -152,6 +152,8 @@ void compile_mov(
         flags = OP_SHARED_BUFF;
     } else if (ty->connective == TYPE_TUPLE || ty->connective == TYPE_RECORD) {
         flags = OP_64BIT;
+    } else if (ty->connective == TYPE_PROCEDURE) {
+        flags = OP_64BIT;
     } else {
         fprintf(stderr, "Error: Move instructions are only "
             "implemented for arrays and 64 bit integers.\n");
@@ -380,6 +382,10 @@ void compile_operation(
         if (inner->connective == TYPE_ARRAY) {
             result.flags = OP_SHARED_BUFF;
         } else if (inner->connective == TYPE_INT) {
+            result.flags = OP_64BIT;
+        } else if (inner->connective == TYPE_PROCEDURE) {
+            /* TODO: Make procedures have enclosed state, and handle that
+               appropriately. */
             result.flags = OP_64BIT;
         } else {
             /* Not a scalar, so give a pointer instead. TODO: Break this up

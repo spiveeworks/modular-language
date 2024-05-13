@@ -25,3 +25,8 @@ function h(x: Int) -> {Int, Int} {
 }
 
 s_to_l := h(5);
+
+gs := [g];
+
+g_to_s2 := gs[0](p);
+l_to_s2 := gs[0]({7, 8});
