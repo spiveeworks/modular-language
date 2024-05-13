@@ -41,6 +41,8 @@ struct pattern_command {
 
     int arg_count;
     size_t arg_command_count;
+
+    bool has_child_struct;
 };
 
 /* This is like our AST, but we will be compiling it as soon as possible. */
@@ -118,6 +120,8 @@ struct partial_operation {
     int arg_count;
     size_t arg_command_count;
     size_t open_command_index;
+
+    size_t has_child_struct;
 };
 
 struct partial_operation_buffer {
@@ -465,6 +469,13 @@ bool resolve_closing_token(
         open->arg_count = top->arg_count;
         open->arg_command_count =
             out->count - top->open_command_index - 1;
+        open->has_child_struct = top->has_child_struct;
+
+        if (stack->lhs.count >= 2 && (top->type == PARTIAL_TUPLE || top->type == PARTIAL_RECORD)) {
+            /* We just pushed a struct literal onto the intermediate buffer,
+               so mark its parent as having a struct literal. */
+            stack->lhs.data[stack->lhs.count - 2].has_child_struct = true;
+        }
 
         /* Whatever just happened, it gave us an expression, that might fill
            further holes on the left or the right. */
@@ -570,6 +581,8 @@ struct emplace_info {
     int args_total;
     int size; /* Total size for structs, per-element size for arrays. */
     struct type *element_type;
+
+    struct proc_call_info call_info;
 };
 
 struct emplace_stack {
@@ -606,8 +619,58 @@ void compile_begin_emplace(
 
         next_emplace->pointer_intermediate_index = intermediates->count - 1;
     } else if (c->type == PATTERN_PROCEDURE_CALL) {
+        struct intermediate *proc_val = buffer_top(*intermediates);
+        if (proc_val->type.connective != TYPE_PROCEDURE) {
+            fprintf(stderr, "Error: Procedure call pattern did not have a procedure to apply to?\n");
+            exit(EXIT_FAILURE);
+        }
+        struct type_buffer outputs = proc_val->type.proc.outputs;
+        size_t output_bytes = 0;
+        for (int i = 0; i < outputs.count; i++) {
+            struct type *it = &outputs.data[i];
+            if (it->connective == TYPE_TUPLE || it->connective == TYPE_RECORD) {
+                output_bytes += it->total_size;
+            }
+        }
+
+        bool has_input_memory = c->has_child_struct;
+
+        /* Mark no alloc instruction, because although we might allocate
+           something, we already know how big it is, and don't need to come
+           back to edit it. */
         next_emplace->alloc_instruction_index = -1;
         next_emplace->size = 0;
+
+        next_emplace->call_info.keep_output_memory = output_bytes > 0;
+        if (output_bytes == 0 && has_input_memory) {
+            output_bytes = 8;
+        }
+        if (output_bytes > 0) {
+            if (proc_val->ref.type != REF_GLOBAL) {
+                fprintf(stderr, "Error: Anonymous functions with struct inputs/outputs require tricky allocations and are not yet implemented.\n");
+                exit(EXIT_FAILURE);
+            }
+
+            struct ref temp_memory = {REF_TEMPORARY, intermediates->next_local_index};
+            intermediates->next_local_index += 1;
+
+            struct instruction *alloc_instr = buffer_addn(*out, 1);
+            alloc_instr->op = OP_STACK_ALLOC;
+            alloc_instr->flags = 0;
+            alloc_instr->output = temp_memory;
+            alloc_instr->arg1.type = REF_CONSTANT;
+            alloc_instr->arg1.x = output_bytes;
+            alloc_instr->arg2.type = REF_NULL;
+            alloc_instr->arg2.x = 0;
+
+            next_emplace->call_info.temp_memory = temp_memory;
+        } else {
+            next_emplace->call_info.temp_memory.type = REF_NULL;
+        }
+        next_emplace->call_info.output_bytes = output_bytes;
+        next_emplace->call_info.has_input_memory = has_input_memory;
+
+        next_emplace->pointer_intermediate_index = intermediates->count - 1;
     } else {
         fprintf(stderr, "Error at line %d, %d: Got unknown pattern command %d "
             "from token \"", c->tk.row, c->tk.column, c->type);
@@ -750,11 +813,12 @@ void compile_end_emplace(
     struct pattern_command *c
 ) {
     if (em->type == PATTERN_PROCEDURE_CALL) {
+        em->call_info.arg_count = em->args_total;
         compile_proc_call(
             out,
             local_count,
             intermediates,
-            em->args_total
+            &em->call_info
         );
     } else if (em->type == PATTERN_ARRAY) {
         struct intermediate *pointer_val =

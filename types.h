@@ -142,6 +142,7 @@ struct record_table {
 
     size_t global_count;
     size_t arg_count;
+    size_t out_ptr_count;
     /* local count (including args) = count - global_count */
 };
 

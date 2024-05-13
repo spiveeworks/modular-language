@@ -166,6 +166,8 @@ struct type parse_type(struct tokenizer *tokenizer) {
                     struct record_entry *new = buffer_addn(result.fields, 1);
                     new->name = name_tk.it;
                     new->type = ty;
+
+                    result.total_size += ty.total_size;
                 } else {
                     if (got_element && result.connective != TYPE_TUPLE) {
                         fprintf(stderr, "Error at line %d, %d: Cannot mix anonymous elements with named fields in a single tuple/record type.", tk.row, tk.column);
@@ -177,6 +179,8 @@ struct type parse_type(struct tokenizer *tokenizer) {
                     got_element = true;
 
                     buffer_push(result.elements, ty);
+
+                    result.total_size += ty.total_size;
 
                     put_token_back(tokenizer, tk);
                 }
@@ -303,10 +307,14 @@ struct record_entry parse_procedure(
 
     struct type_buffer output_types = {0};
     bool result_specified = false;
+    bindings->out_ptr_count = 0;
 
     if (tk.id == TOKEN_ARROW) {
         struct type ty = parse_type(tokenizer);
         result_specified = true;
+        if (ty.connective == TYPE_TUPLE || ty.connective == TYPE_RECORD) {
+            bindings->out_ptr_count += 1;
+        }
         buffer_push(output_types, ty);
 
         tk = get_token(tokenizer);
@@ -332,15 +340,23 @@ struct record_entry parse_procedure(
 
         buffer_free(lhs);
 
-        compile_return(out, bindings, &intermediates);
         /* TODO: Unify these outputs */
         if (!result_specified) {
             for (int i = 0; i < intermediates.count; i++) {
-                buffer_push(output_types, intermediates.data[i].type);
+                struct type *it = &intermediates.data[i].type;
+                if (it->connective == TYPE_TUPLE || it->connective == TYPE_RECORD) {
+                    fprintf(stderr, "Error on line %d: Currently one-line "
+                        "functions/procedures require signatures if their "
+                        "output/s include a tuple or record type.", tk.row);
+                    exit(EXIT_FAILURE);
+                }
+                buffer_push(output_types, *it);
             }
         } else {
             type_check_return(&output_types, &intermediates, proc_name);
         }
+
+        compile_return(out, bindings, &intermediates);
 
         buffer_free(intermediates);
     } else if (tk.id == '{') {
@@ -397,6 +413,8 @@ struct record_entry parse_procedure(
     }
 
     bindings->count = prev_binding_count;
+    bindings->out_ptr_count = 0;
+    bindings->arg_count = 0;
 
     struct record_entry result;
     result.name = proc_name;

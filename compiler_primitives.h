@@ -67,7 +67,7 @@ struct intermediate_buffer {
 };
 
 struct intermediate_buffer intermediates_start(struct record_table *bindings) {
-    size_t local_count = bindings->count - bindings->global_count;
+    size_t local_count = bindings->count - bindings->global_count + bindings->out_ptr_count;
     return (struct intermediate_buffer){.next_local_index = local_count};
 }
 
@@ -116,9 +116,12 @@ void compile_value_token(
         if (ind < bindings->global_count) {
             loc->ref.type = REF_GLOBAL;
             loc->ref.x = ind;
-        } else {
+        } else if (ind < bindings->global_count + bindings->arg_count) {
             loc->ref.type = REF_LOCAL;
             loc->ref.x = ind - bindings->global_count;
+        } else {
+            loc->ref.type = REF_LOCAL;
+            loc->ref.x = ind - bindings->global_count + bindings->out_ptr_count;
         }
     } else if (in->id == TOKEN_NUMERIC) {
         int64 value = integer_from_string(in->it);
@@ -594,22 +597,32 @@ void compile_struct_member(
     }
 }
 
+/* TODO: Move the definitions here. */
+void compile_variable_decrements(
+    struct instruction_buffer *out,
+    struct ref it,
+    struct type *type,
+    size_t ref_offset,
+    bool destroy_structs,
+    bool free_structs
+);
+
+struct proc_call_info {
+    size_t output_bytes;
+    int arg_count;
+    bool has_input_memory;
+    bool keep_output_memory;
+    struct ref temp_memory;
+};
+
 void compile_proc_call(
     struct instruction_buffer *out,
     int local_count,
     struct intermediate_buffer *intermediates,
-    int arg_count
+    struct proc_call_info *call
 ) {
-    struct instruction instr = {0};
-    instr.op = OP_CALL;
-    instr.flags = 0;
-    instr.output.type = REF_NULL;
-
-    size_t proc_index = intermediates->count - arg_count - 1;
+    size_t proc_index = intermediates->count - call->arg_count - 1;
     struct intermediate proc_val = intermediates->data[proc_index];
-    /* This is supposed to be a valid procedure, we will see if it actually has
-       the right type, though. */
-    instr.arg1 = proc_val.ref;
 
     if (proc_val.type.connective != TYPE_PROCEDURE) {
         /* TODO: Get a row/column here somehow */
@@ -620,15 +633,15 @@ void compile_proc_call(
     struct type_buffer inputs = proc_val.type.proc.inputs;
     struct type_buffer outputs = proc_val.type.proc.outputs;
 
-    if (inputs.count != arg_count) {
+    if (inputs.count != call->arg_count) {
         /* TODO: Get a row/column here somehow */
         fprintf(stderr, "Error: Procedure expected %d arguments, but %d were "
-            "given.\n", (int)inputs.count, (int)arg_count);
+            "given.\n", (int)inputs.count, (int)call->arg_count);
         exit(EXIT_FAILURE);
     }
 
     struct intermediate *actual_types =
-        &intermediates->data[intermediates->count - arg_count];
+        &intermediates->data[intermediates->count - call->arg_count];
 
     for (int i = 0; i < inputs.count; i++) {
         if (!type_eq(&inputs.data[i], &actual_types[i].type)) {
@@ -639,22 +652,124 @@ void compile_proc_call(
         }
     }
 
-    instr.arg2.type = REF_CONSTANT;
-    instr.arg2.x = local_count + proc_index;
+    if (call->keep_output_memory) {
+        size_t curr_offset = 0;
+        for (int i = 0; i < outputs.count; i++) {
+            struct type *out_type = &outputs.data[i];
+            if (out_type->connective != TYPE_TUPLE && out_type->connective != TYPE_RECORD) {
+                continue;
+            }
 
+            struct instruction *instr = buffer_addn(*out, 1);
+            instr->op = OP_PLUS;
+            instr->flags = OP_64BIT;
+            instr->output.type = REF_TEMPORARY;
+            instr->output.x = intermediates->next_local_index + i;
+            instr->arg1 = call->temp_memory;
+            instr->arg2.type = REF_CONSTANT;
+            instr->arg2.x = curr_offset;
+
+            curr_offset += out_type->total_size;
+        }
+    }
+
+    struct instruction instr = {0};
+    instr.op = OP_CALL;
+    instr.flags = 0;
+    instr.output.type = REF_NULL;
+    instr.arg1 = proc_val.ref;
+    instr.arg2.type = REF_CONSTANT;
+    instr.arg2.x = intermediates->next_local_index - call->arg_count;
     buffer_push(*out, instr);
 
     /* discard args */
-    intermediates->count -= arg_count;
-    intermediates->next_local_index -= arg_count;
+    if (call->has_input_memory) {
+        /* We can destroy the input structs without worrying about the outputs,
+           since compile_variable_decrements works in-place using
+           OP_POINTER_DECREMENT_REFCOUNT */
+        size_t curr_offset = call->output_bytes;
+        for (int i = 0; i < inputs.count; i++) {
+            struct intermediate *it = &actual_types[i];
+            if (it->owns_stack_memory) {
+                /* Functions don't destroy/free structs that are passed to them, so
+                   we have to destroy them ourselves. */
+                /* We are destroying these terms left to right, so we don't want to
+                   free them, instead we free them all in one go at the end. */
+                compile_variable_decrements(out, call->temp_memory, &it->type, curr_offset + it->ref_offset, true, false);
+                curr_offset += it->type.total_size;
+            }
+        }
+    }
+    intermediates->count -= call->arg_count;
+    intermediates->next_local_index -= call->arg_count;
+
     /* discard proc */
     pop_intermediate(intermediates);
 
-    /* add result */
-    buffer_maybe_grow(*intermediates, outputs.count);
-    for (int i = 0; i < outputs.count; i++) {
-        /* TODO: What if the outputs are tuples/records? */
-        push_intermediate(intermediates, outputs.data[i]);
+    /* remove temp pointer */
+    if (call->keep_output_memory) {
+        /* We have structs to return, so we want to use the temp_memory pointer
+           as the output. */
+        if (outputs.count > 1) {
+            fprintf(stderr, "Error: Structs in multivalue function results are not yet implemented.\n");
+        }
+        if (outputs.count == 0) {
+            fprintf(stderr, "Error: Function was called with keep_output_memory had no outputs?\n");
+            exit(EXIT_FAILURE);
+        }
+
+        if (call->has_input_memory) {
+            /* We need to free some temp inputs, but we also need to keep the
+               temp pointer since it points to the output. */
+            struct ref inputs_ptr = {REF_TEMPORARY, intermediates->next_local_index};
+            struct instruction *instrs = buffer_addn(*out, 2);
+            instrs[0].op = OP_PLUS;
+            instrs[0].flags = OP_64BIT;
+            instrs[0].output = inputs_ptr;
+            instrs[0].arg1 = call->temp_memory;
+            instrs[0].arg2.type = REF_CONSTANT;
+            instrs[0].arg2.x = call->output_bytes;
+
+            instrs[1].op = OP_STACK_FREE;
+            instrs[1].flags = 0;
+            instrs[1].output.type = REF_NULL;
+            instrs[1].arg1 = inputs_ptr;
+            instrs[1].arg2.type = REF_NULL;
+        }
+
+        /* If there is only one output, we already have the pointer to it on
+           the stack, so we don't need to do any rearrangements. Just make this
+           pointer visible by giving it a type. */
+        intermediates->next_local_index -= 1;
+        push_intermediate(intermediates, outputs.data[0]);
+        struct intermediate *val = buffer_top(*intermediates);
+        val->owns_stack_memory = true;
+    } else if (call->has_input_memory) {
+        /* We want to discard the temp memory altogether, so free it, and move
+           all the outputs back one index. */
+        struct instruction *instr = buffer_addn(*out, 1);
+        instr->op = OP_STACK_FREE;
+        instr->flags = 0;
+        instr->output.type = REF_NULL;
+        instr->arg1 = call->temp_memory;
+        instr->arg2.type = REF_NULL;
+
+        intermediates->next_local_index -= 1;
+
+        for (int i = 0; i < outputs.count; i++) {
+            struct ref to = {REF_TEMPORARY, intermediates->next_local_index};
+            struct ref from = {REF_TEMPORARY, intermediates->next_local_index + 1};
+            compile_mov(out, to, from, &outputs.data[i]);
+            push_intermediate(intermediates, outputs.data[i]);
+        }
+    } else {
+        /* No temp memory to worry about, just add the outputs to the
+           intermediates buffer. */
+        buffer_maybe_grow(*intermediates, outputs.count);
+        for (int i = 0; i < outputs.count; i++) {
+            /* TODO: What if the outputs are tuples/records? */
+            push_intermediate(intermediates, outputs.data[i]);
+        }
     }
 }
 
@@ -687,7 +802,9 @@ void compile_variable_decrements(
     struct ref it,
     struct type *type,
     size_t ref_offset,
-    bool free_data_stack
+    bool destroy_structs,
+    /* TODO: Make this the caller's responsibility? */
+    bool free_structs
 ) {
     if (type->connective == TYPE_ARRAY) {
         struct instruction *instr = buffer_addn(*out, 1);
@@ -697,9 +814,10 @@ void compile_variable_decrements(
         instr->arg1 = it;
         instr->arg2.type = REF_NULL;
     } else if (type->connective == TYPE_TUPLE || type->connective == TYPE_RECORD) {
-        compile_pointer_refcounts(out, it, ref_offset, type, true);
-
-        if (free_data_stack) {
+        if (destroy_structs) {
+            compile_pointer_refcounts(out, it, ref_offset, type, true);
+        }
+        if (free_structs) {
             struct instruction *instr = buffer_addn(*out, 1);
             instr->op = OP_STACK_FREE;
             instr->flags = 0;
@@ -720,10 +838,10 @@ void compile_local_decrements(
     int64 local_count = bindings->count - bindings->global_count;
     for (int64 i = local_count - 1; i >= 0; i--) {
         struct record_entry *it = &bindings->data[bindings->global_count + i];
-        struct ref ref = {REF_LOCAL, i};
+        struct ref ref = {REF_LOCAL, i + bindings->out_ptr_count};
         bool is_arg = i < bindings->arg_count;
         /* TODO: Combine all of the stack free operations into one? */
-        compile_variable_decrements(out, ref, &it->type, 0, !is_arg);
+        compile_variable_decrements(out, ref, &it->type, 0, !is_arg, !is_arg);
     }
 }
 
@@ -743,7 +861,35 @@ void compile_return(
         exit(EXIT_FAILURE);
     }
     if (val_count == 1) {
-        compile_push(out, intermediates);
+        struct type *result_type = &intermediates->data[0].type;
+        if (result_type->connective == TYPE_TUPLE || result_type->connective == TYPE_RECORD) {
+            if (bindings->out_ptr_count != 1) {
+                /* TODO: Better error message for when this is actually
+                   reachable? */
+                fprintf(stderr, "Error: Expected %llu struct results, but got 1.\n", bindings->out_ptr_count);
+                exit(EXIT_FAILURE);
+            }
+            struct ref out_ptr = {REF_LOCAL, bindings->global_count};
+            compile_copy(
+                out,
+                intermediates,
+                out_ptr,
+                &intermediates->data[0],
+                false
+            );
+
+            /* This function doesn't actually return any scalars, so we want to
+               RET 0, not RET 1. */
+            val_count -= 1;
+        } else {
+            if (bindings->out_ptr_count != 0) {
+                /* TODO: Better error message for when this is actually
+                   reachable? */
+                fprintf(stderr, "Error: Expected %llu struct results, but got none.\n", bindings->out_ptr_count);
+                exit(EXIT_FAILURE);
+            }
+            compile_push(out, intermediates);
+        }
     }
 
     compile_local_decrements(out, bindings);
@@ -766,7 +912,7 @@ void compile_multivalue_decrements(
         struct intermediate it = buffer_pop(*intermediates);
         if (it.ref.type == REF_TEMPORARY && (it.type.connective == TYPE_ARRAY || it.owns_stack_memory)) {
             /* TODO: Combine all of the stack free operations into one? */
-            compile_variable_decrements(out, it.ref, &it.type, it.ref_offset, true);
+            compile_variable_decrements(out, it.ref, &it.type, it.ref_offset, true, true);
         }
     }
 }
