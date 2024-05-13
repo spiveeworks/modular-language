@@ -558,16 +558,16 @@ void compile_struct_member(
                    everything except this element. */
                 size_t dealloc_offset = it->ref_offset;
                 for (int i = 0; i < it->type.elements.count; i++) {
-                    if (i == member_index) continue;
-
                     struct type *element_type = &it->type.elements.data[i];
-                    compile_pointer_refcounts(
-                        out,
-                        it->ref,
-                        dealloc_offset, /* offset from it->ref */
-                        element_type,
-                        true /* lower refcounts, rather than increase */
-                    );
+                    if (i != member_index) {
+                        compile_pointer_refcounts(
+                            out,
+                            it->ref,
+                            dealloc_offset, /* offset from it->ref */
+                            element_type,
+                            true /* lower refcounts, rather than increase */
+                        );
+                    }
                     dealloc_offset += element_type->total_size;
                 }
             } else if (it->type.connective == TYPE_RECORD) {
@@ -661,8 +661,8 @@ void compile_proc_call(
             }
 
             struct instruction *instr = buffer_addn(*out, 1);
-            instr->op = OP_PLUS;
-            instr->flags = OP_64BIT;
+            instr->op = OP_POINTER_OFFSET;
+            instr->flags = 0;
             instr->output.type = REF_TEMPORARY;
             instr->output.x = intermediates->next_local_index + i;
             instr->arg1 = call->temp_memory;
@@ -723,7 +723,7 @@ void compile_proc_call(
                temp pointer since it points to the output. */
             struct ref inputs_ptr = {REF_TEMPORARY, intermediates->next_local_index};
             struct instruction *instrs = buffer_addn(*out, 2);
-            instrs[0].op = OP_PLUS;
+            instrs[0].op = OP_POINTER_OFFSET;
             instrs[0].flags = OP_64BIT;
             instrs[0].output = inputs_ptr;
             instrs[0].arg1 = call->temp_memory;
@@ -869,7 +869,7 @@ void compile_return(
                 fprintf(stderr, "Error: Expected %llu struct results, but got 1.\n", bindings->out_ptr_count);
                 exit(EXIT_FAILURE);
             }
-            struct ref out_ptr = {REF_LOCAL, bindings->global_count};
+            struct ref out_ptr = {REF_LOCAL, bindings->arg_count};
             compile_copy(
                 out,
                 intermediates,

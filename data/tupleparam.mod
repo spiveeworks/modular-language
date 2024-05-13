@@ -19,3 +19,9 @@ l_to_s := f({3, 4});
 g_to_l := g(p);
 
 l_to_l := g({5, 6});
+
+function h(x: Int) -> {Int, Int} {
+    return {x, x + 1};
+}
+
+s_to_l := h(5);
