@@ -1,3 +1,9 @@
+#ifdef _WIN32
+#define _CRTDBG_MAP_ALLOC
+#include <windows.h>
+#include <crtdbg.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -320,6 +326,30 @@ int main(int argc, char **argv) {
         if (repl) printf("> ");
     }
 
+#ifdef _DEBUG
+#ifdef _WIN32
+    bool found_leak = _CrtDumpMemoryLeaks();
+    if (found_leak) {
+        printf("Leak found!!\n");
+
+        HANDLE log_file = CreateFile(
+            "leaks.txt",
+            GENERIC_WRITE,
+            FILE_SHARE_WRITE,
+            NULL,
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            NULL
+        );
+        _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
+        _CrtSetReportFile(_CRT_WARN, log_file);
+
+        _CrtMemDumpAllObjectsSince(NULL);
+    } else {
+        printf("No leaks found :)\n");
+    }
+#endif /* _WIN32 */
+#endif /* _DEBUG */
     return 0;
 }
 
