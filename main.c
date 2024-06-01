@@ -125,7 +125,7 @@ void print_data(uint8 *it, struct type *type) {
         printf("{");
         for (int i = 0; i < type->fields.count; i++) {
             if (i > 0) printf(", ");
-            struct record_entry *field = &type->fields.data[i];
+            struct field *field = &type->fields.data[i];
             fputstr(field->name, stdout);
             printf(": ");
             print_data(it, &field->type);

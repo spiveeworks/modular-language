@@ -147,8 +147,8 @@ struct record_table {
 };
 
 /* TODO: What should these two structs actually be called? */
-struct field_record_table {
-    struct record_entry *data;
+struct field_buffer {
+    struct field *data;
     size_t count;
     size_t capacity;
 };
@@ -171,7 +171,7 @@ struct type {
     union {
         uint8 word_size; /* 0 => 8 bits, up to 3 => 64 bits */
         struct type_buffer elements;
-        struct field_record_table fields;
+        struct field_buffer fields;
         struct type *inner;
         struct proc_signature proc;
     };
@@ -179,6 +179,12 @@ struct type {
 };
 
 struct record_entry {
+    str name;
+    struct type type;
+    bool is_var;
+};
+
+struct field {
     str name;
     struct type type;
 };
@@ -245,7 +251,7 @@ int lookup_name(struct record_table *table, str name) {
     return -1;
 }
 
-int lookup_name_fields(struct field_record_table *table, str name) {
+int lookup_name_fields(struct field_buffer *table, str name) {
     for (int i = table->count - 1; i >= 0; i--) {
         if (str_eq(name, table->data[i].name)) return i;
     }
@@ -281,8 +287,8 @@ bool type_eq(struct type *a, struct type *b) {
     case TYPE_RECORD:
         if (a->fields.count != b->fields.count) return false;
         for (int i = 0; i < a->fields.count; i++) {
-            struct record_entry *a_entry = &a->fields.data[i];
-            struct record_entry *b_entry = &b->fields.data[i];
+            struct field *a_entry = &a->fields.data[i];
+            struct field *b_entry = &b->fields.data[i];
             if (!str_eq(a_entry->name, b_entry->name)) {
                 return false;
             }

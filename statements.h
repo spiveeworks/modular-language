@@ -94,8 +94,22 @@ struct intermediate_buffer parse_statement(
             buffer_free(lhs);
             buffer_free(intermediates);
         } else if (tk.id == '=') {
-            fprintf(stderr, "Error: Ref assignment not yet implemented.\n");
-            exit(EXIT_FAILURE);
+            struct pattern rhs = parse_expression(tokenizer, false);
+
+            tk = get_token(tokenizer);
+            if (tk.id != ';') {
+                /* TODO: Make a token assert proc? */
+                fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
+                    tk.row, tk.column);
+                fputstr(tk.it, stderr);
+                fprintf(stderr, "\"\n");
+                exit(EXIT_FAILURE);
+            }
+
+            compile_assignment(out, bindings, &lhs, &rhs);
+
+            buffer_free(lhs);
+            buffer_free(rhs);
         } else {
             fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
                     tk.row, tk.column);
@@ -163,7 +177,7 @@ struct type parse_type(struct tokenizer *tokenizer) {
                     result.connective = TYPE_RECORD;
                     got_element = true;
 
-                    struct record_entry *new = buffer_addn(result.fields, 1);
+                    struct field *new = buffer_addn(result.fields, 1);
                     new->name = name_tk.it;
                     new->type = ty;
 
@@ -269,6 +283,18 @@ struct record_entry parse_procedure(
         }
         /* else */
 
+        bool is_var = false;
+        if (tk.id == TOKEN_VAR) {
+            is_var = true;
+            tk = get_token(tokenizer);
+        }
+
+        if (tk.id != TOKEN_ALPHANUM) {
+            fprintf(stderr, "Error at line %d, %d: Unexpected token \"",
+                tk.row, tk.column);
+            fputstr(tk.it, stderr);
+            fprintf(stderr, "\" in parameter list.\n");
+        }
         str name = tk.it;
 
         tk = get_token(tokenizer);
@@ -287,6 +313,7 @@ struct record_entry parse_procedure(
         struct record_entry *new = buffer_addn(*bindings, 1);
         new->name = name;
         new->type = ty;
+        new->is_var = is_var;
 
         tk = get_token(tokenizer);
         if (tk.id == ')') {
@@ -419,6 +446,7 @@ struct record_entry parse_procedure(
     struct record_entry result;
     result.name = proc_name;
     result.type = type_proc(input_types, output_types);
+    result.is_var = false;
     return result;
 }
 

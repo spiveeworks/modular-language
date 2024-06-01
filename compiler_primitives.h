@@ -96,33 +96,57 @@ struct ref push_intermediate(struct intermediate_buffer *intermediates, struct t
     return result;
 }
 
+struct ref variable_index_ref(struct record_table *bindings, int ind) {
+    struct ref result;
+
+    if (ind < bindings->global_count) {
+        result.type = REF_GLOBAL;
+        result.x = ind;
+    } else if (ind < bindings->global_count + bindings->arg_count) {
+        result.type = REF_LOCAL;
+        result.x = ind - bindings->global_count;
+    } else {
+        result.type = REF_LOCAL;
+        result.x = ind - bindings->global_count + bindings->out_ptr_count;
+    }
+
+    return result;
+}
+
+void scope_error(struct token *tk) {
+    fprintf(stderr, "Error on line %d, %d: \"", tk->row, tk->column);
+    fputstr(tk->it, stderr);
+    fprintf(stderr, "\" is not defined in this scope.\n");
+    exit(EXIT_FAILURE);
+}
+
+struct record_entry *convert_name(
+    struct record_table *bindings,
+    struct token *in,
+    struct type *type_out,
+    struct ref *ref_out
+) {
+    int ind = lookup_name(bindings, in->it);
+    if (ind == -1) scope_error(in);
+
+    struct record_entry *binding = &bindings->data[ind];
+
+    if (type_out) *type_out = binding->type;
+    if (ref_out) *ref_out = variable_index_ref(bindings, ind);
+
+    return binding;
+}
+
 void compile_value_token(
     struct record_table *bindings,
     struct intermediate_buffer *intermediates,
     struct token *in
 ) {
     if (in->id == TOKEN_ALPHANUM) {
-        int ind = lookup_name(bindings, in->it);
-        if (ind == -1) {
-            fprintf(stderr, "Error on line %d, %d: \"", in->row, in->column);
-            fputstr(in->it, stderr);
-            fprintf(stderr, "\" is not defined in this scope.\n");
-            exit(EXIT_FAILURE);
-        }
-
         struct intermediate *loc = buffer_addn(*intermediates, 1);
         *loc = (struct intermediate){0};
-        loc->type = bindings->data[ind].type;
-        if (ind < bindings->global_count) {
-            loc->ref.type = REF_GLOBAL;
-            loc->ref.x = ind;
-        } else if (ind < bindings->global_count + bindings->arg_count) {
-            loc->ref.type = REF_LOCAL;
-            loc->ref.x = ind - bindings->global_count;
-        } else {
-            loc->ref.type = REF_LOCAL;
-            loc->ref.x = ind - bindings->global_count + bindings->out_ptr_count;
-        }
+
+        convert_name(bindings, in, &loc->type, &loc->ref);
     } else if (in->id == TOKEN_NUMERIC) {
         int64 value = integer_from_string(in->it);
 

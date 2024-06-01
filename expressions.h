@@ -34,7 +34,8 @@ enum pattern_command_type {
 struct pattern_command {
     enum pattern_command_type type;
 
-    bool takes_ref;
+    bool is_var;
+    bool takes_ref; /* What was this for, again? */
 
     struct token tk;
     struct token identifier; /* For record literals and maybe other things. */
@@ -176,7 +177,22 @@ void read_next_ref(
 ) {
     struct token tk = get_token(tokenizer);
 
-    if (tk.id == TOKEN_NUMERIC || tk.id == TOKEN_ALPHANUM) {
+    if (tk.id == TOKEN_VAR) {
+        tk = get_token(tokenizer);
+        if (tk.id != TOKEN_ALPHANUM) {
+            fprintf(stderr, "Error on line %d, %d: Got unexpected "
+                    "token \"", tk.row, tk.column);
+            fputstr(tk.it, stderr);
+            fprintf(stderr, "\" while parsing var declaration.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        struct pattern_command val = {PATTERN_VALUE};
+        val.tk = tk;
+        val.is_var = true;
+        buffer_push(*out, val);
+        stack->have_next_ref = true;
+    } else if (tk.id == TOKEN_NUMERIC || tk.id == TOKEN_ALPHANUM) {
         /* In record literals we don't want to interpret names as variables, so
            peek to see if there is a colon and if it is part of a record
            literal. This code path will also get activated by type ascriptions
@@ -782,7 +798,7 @@ void compile_end_arg(
 
             pointer_val->type.total_size += val_type.total_size;
 
-            struct record_entry *new = buffer_addn(pointer_val->type.fields, 1);
+            struct field *new = buffer_addn(pointer_val->type.fields, 1);
             new->name = c->identifier.it;
             new->type = val_type;
         } else {
@@ -973,6 +989,7 @@ void assert_match_pattern(
         new->name = c->tk.it;
         struct intermediate val = buffer_pop(*values);
         new->type = val.type;
+        new->is_var = c->is_var;
 
         struct ref new_var;
         if (global) {
@@ -1056,6 +1073,81 @@ void assert_match_pattern(
         }
 
         pattern->count -= 1;
+
+        /* TODO: Test for multi-value commas and pop them? I don't know. */
+    }
+}
+
+void compile_assignment(
+    struct instruction_buffer *out,
+    struct record_table *bindings,
+    struct pattern *lhs,
+    struct pattern *rhs
+) {
+    /* Do we want to compile the LHS first? Or the RHS? */
+    struct intermediate_buffer values = compile_expression(out, bindings, rhs);
+
+    while (lhs->count > 0) {
+        if (values.count == 0) {
+            struct token *tk = &lhs->data[0].tk;
+            fprintf(stderr, "Error at line %d, %d: There are more values on "
+                "the left hrnd side of the assignment than on the right hand "
+                "side.\n", tk->row, tk->column);
+            exit(EXIT_FAILURE);
+        }
+
+        struct pattern_command *c = buffer_top(*lhs);
+        if (c->type != PATTERN_VALUE) {
+            fprintf(stderr, "Error at line %d, %d: The operator \"",
+                c->tk.row, c->tk.column);
+            fputstr(c->tk.it, stderr);
+            fprintf(stderr, "\" appeared on the left hand side of an "
+                "assignment statement. Pattern matching is not "
+                "implemented.\n");
+            exit(EXIT_FAILURE);
+        }
+        if (c->tk.id != TOKEN_ALPHANUM) {
+            fprintf(stderr, "Error at line %d, %d: The literal \"",
+                c->tk.row, c->tk.column);
+            fputstr(c->tk.it, stderr);
+            fprintf(stderr, "\" appeared on the left hand side of an "
+                "assignment statement. Pattern matching is not "
+                "implemented.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        struct ref ref;
+        struct record_entry *binding = convert_name(bindings, &c->tk, NULL, &ref);
+
+        struct intermediate val = buffer_pop(values);
+        if (!type_eq(&binding->type, &val.type)) {
+            fprintf(stderr, "Error at line %d, %d: Tried to assign something "
+                "to \"", c->tk.row, c->tk.column);
+            fputstr(c->tk.it, stderr);
+            fprintf(stderr, "\", but the expression on the right hand side "
+                "had the wrong type.\n");
+            exit(EXIT_FAILURE);
+        }
+
+        /* Only perform the assignment if the terms are different. */
+        if (val.ref.type != ref.type || val.ref.x != ref.x) {
+            compile_variable_decrements(out, ref, &binding->type, 0, true, false);
+            if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
+                compile_copy(out, &values, ref, &val, false);
+            } else {
+                compile_mov(out, ref, val.ref, &val.type);
+            }
+        }
+
+        if (lhs->count == 1 && values.count > 0) {
+            struct token *tk = &lhs->data[0].tk;
+            fprintf(stderr, "Error at line %d, %d: There are more values on "
+                "the right hand side of the assignment than on the left hand "
+                "side.\n", tk->row, tk->column);
+            exit(EXIT_FAILURE);
+        }
+
+        lhs->count -= 1;
 
         /* TODO: Test for multi-value commas and pop them? I don't know. */
     }
