@@ -328,7 +328,7 @@ void call_stack_push_exec_frame(
    REF_NULL. It isn't the interpreter's job to make sure that REF_NULL is used
    correctly. */
 union variable_contents read_ref(
-    struct execution_frame *frame,
+    size_t locals_start,
     struct variable_stack *vars,
     struct ref ref
 ) {
@@ -345,7 +345,7 @@ union variable_contents read_ref(
         break;
     case REF_LOCAL:
     case REF_TEMPORARY:
-        index = frame->locals_start + ref.x;
+        index = locals_start + ref.x;
         break;
     default:
         fprintf(stderr, "Unexpected ref.type value %d?\n", ref.type);
@@ -399,9 +399,9 @@ void continue_execution(
 
         /* Execute instruction. */
         union variable_contents arg1_full =
-            read_ref(frame, &stack->vars, next->arg1);
+            read_ref(frame->locals_start, &stack->vars, next->arg1);
         union variable_contents arg2_full =
-            read_ref(frame, &stack->vars, next->arg2);
+            read_ref(frame->locals_start, &stack->vars, next->arg2);
         int64 arg1 = arg1_full.val64;
         int64 arg2 = arg2_full.val64;
         union variable_contents result = {0};
@@ -547,7 +547,7 @@ void continue_execution(
           {
             /* TODO: check that the 'output' array is a shared_buff. */
             union variable_contents output =
-                read_ref(frame, &stack->vars, output_ref);
+                read_ref(frame->locals_start, &stack->vars, output_ref);
             /* TODO: check that the memory accessed is actually an initialised
                and aligned part of the buffer. */
             uint8 *data = shared_buff_get_index(output.shared_buff, arg1);
@@ -625,7 +625,7 @@ void continue_execution(
           {
             /* TODO: check that the 'output' array is a shared_buff. */
             union variable_contents output =
-                read_ref(frame, &stack->vars, output_ref);
+                read_ref(frame->locals_start, &stack->vars, output_ref);
             /* TODO: check that the memory accessed is actually an initialised
                and aligned part of the buffer. */
             void *data = output.pointer + arg1;
@@ -642,7 +642,7 @@ void continue_execution(
         case OP_POINTER_COPY:
           {
             union variable_contents output =
-                read_ref(frame, &stack->vars, output_ref);
+                read_ref(frame->locals_start, &stack->vars, output_ref);
             memcpy(output.pointer, arg1_full.pointer, arg2);
             /* Stop the struct variable from being overwritten. */
             output_ref.type = REF_NULL;
@@ -657,7 +657,7 @@ void continue_execution(
         case OP_POINTER_COPY_OVERLAPPING:
           {
             union variable_contents output =
-                read_ref(frame, &stack->vars, output_ref);
+                read_ref(frame->locals_start, &stack->vars, output_ref);
             memmove(output.pointer, arg1_full.pointer, arg2);
             /* Stop the struct variable from being overwritten. */
             output_ref.type = REF_NULL;

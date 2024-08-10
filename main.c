@@ -153,11 +153,7 @@ void print_multi_expression(
         if (i > 0) printf(", ");
 
         struct intermediate *it = &intermediates->data[i];
-        /* Kinda hacky, just reuse the interpreter's read_ref function,
-           but with a bogus execution frame representing the fact that
-           there are no local variables. */
-        struct execution_frame frame = {0};
-        union variable_contents val = read_ref(&frame, vars, it->ref);
+        union variable_contents val = read_ref(vars->global_count, vars, it->ref);
         val.pointer += it->ref_offset;
         print_call_stack_value(val, &it->type);
     }
