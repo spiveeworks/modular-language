@@ -147,7 +147,6 @@ void shared_buff_decrement(struct shared_buff_header *ptr) {
     }
 }
 
-
 void *shared_buff_get_index(struct shared_buff buff, int index) {
     if (index < 0 || index >= buff.count) {
         fprintf(stderr, "Runtime error: Tried to access index %lld of an "
@@ -164,6 +163,20 @@ void *shared_buff_get_index(struct shared_buff buff, int index) {
 void copy_vals(struct type *element_type, void *dest, void *source, int count) {
     memcpy(dest, source, count * element_type->total_size);
     do_increments(source, element_type, count, element_type->total_size);
+}
+
+void shared_buff_make_unique(struct shared_buff *buff) {
+    struct shared_buff_header *ptr = buff->ptr;
+    if (ptr->references > 1) {
+        struct shared_buff unique = shared_buff_alloc(ptr->element_type, buff->count);
+
+        uint8 *source = shared_buff_get_index(*buff, 0);
+        uint8 *dest = shared_buff_get_index(unique, 0);
+        copy_vals(ptr->element_type, dest, source, buff->count);
+
+        *buff = unique;
+        ptr->references -= 1;
+    }
 }
 
 void copy_scalar(
@@ -520,6 +533,16 @@ void continue_execution(
         case OP_ARRAY_OFFSET:
             result.pointer = shared_buff_get_index(arg1_full.shared_buff, arg2);
             break;
+        case OP_ARRAY_OFFSET_MAKE_UNIQUE:
+          {
+            /* Make the variable on the stack unique. */
+            shared_buff_make_unique(&arg1_full.shared_buff);
+            write_ref(frame, &stack->vars, next->arg1, arg1_full);
+
+            /* Then do the offset operation to the unique version. */
+            result.pointer = shared_buff_get_index(arg1_full.shared_buff, arg2);
+            break;
+          }
         case OP_ARRAY_STORE:
           {
             /* TODO: check that the 'output' array is a shared_buff. */
@@ -644,6 +667,24 @@ void continue_execution(
           {
             void *data = arg1_full.pointer + arg2;
             copy_scalar(result.bytes, data, next->flags, false);
+            break;
+          }
+        case OP_POINTER_LOAD_MAKE_UNIQUE:
+          {
+            /* Get the pointer to the array. */
+            void *addr = arg1_full.pointer + arg2;
+            struct shared_buff *data = addr;
+
+            /* Make it unique. */
+            shared_buff_make_unique(data);
+
+            /* Now put it somewhere. */
+            /* We don't increment it, because this opcode is only for
+               temporaries on the LHS. We could introduce a runtime construct,
+               and possibly even a frontend type, representing a mutable array
+               view, but for now we just use an array that secretly hasn't had
+               its refcount increased. */
+            result.shared_buff = *data;
             break;
           }
         case OP_POINTER_INCREMENT_REFCOUNT:

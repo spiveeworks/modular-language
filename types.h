@@ -353,6 +353,7 @@ enum operation {
 
     OP_ARRAY_ALLOC,
     OP_ARRAY_OFFSET,
+    OP_ARRAY_OFFSET_MAKE_UNIQUE,
     OP_ARRAY_STORE,
     OP_ARRAY_INDEX,
     OP_ARRAY_CONCAT,
@@ -368,6 +369,7 @@ enum operation {
     OP_POINTER_DUP, /* Combined stack alloc and copy, useful for reading temp pointers. */
     OP_POINTER_COPY_OVERLAPPING,
     OP_POINTER_LOAD,
+    OP_POINTER_LOAD_MAKE_UNIQUE,
     OP_POINTER_INCREMENT_REFCOUNT,
     OP_POINTER_DECREMENT_REFCOUNT,
 };

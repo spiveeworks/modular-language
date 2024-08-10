@@ -794,7 +794,7 @@ void compile_end_arg(
             }
 
             size_t offset = pointer_val->type.total_size;
-            struct type val_type = compile_store(out, pointer_val->ref, offset, intermediates);
+            struct type val_type = compile_store_top(out, pointer_val->ref, offset, intermediates);
 
             pointer_val->type.total_size += val_type.total_size;
 
@@ -814,7 +814,7 @@ void compile_end_arg(
             }
 
             size_t offset = pointer_val->type.total_size;
-            struct type val_type = compile_store(out, pointer_val->ref, offset, intermediates);
+            struct type val_type = compile_store_top(out, pointer_val->ref, offset, intermediates);
 
             pointer_val->type.total_size += val_type.total_size;
             buffer_push(pointer_val->type.elements, val_type);
@@ -877,18 +877,19 @@ void compile_end_emplace(
     }
 }
 
-struct intermediate_buffer compile_expression(
+void compile_expression_inner(
     struct instruction_buffer *out,
     struct record_table *bindings,
-    struct pattern *in
+    struct pattern *in,
+    struct intermediate_buffer *intermediates,
+    bool is_assignment_lhs
 ) {
-    struct intermediate_buffer intermediates = intermediates_start(bindings);
     struct emplace_stack emplace_stack = {0};
 
     for (int i = 0; i < in->count; i++) {
         struct pattern_command *c = &in->data[i];
         if (c->type == PATTERN_VALUE) {
-            compile_value_token(bindings, &intermediates, &c->tk);
+            compile_value_token(bindings, intermediates, &c->tk);
         } else if (c->type == PATTERN_UNARY) {
             fprintf(stderr, "Error: Unary operators are not yet "
                 "implemented.\n");
@@ -899,15 +900,17 @@ struct intermediate_buffer compile_expression(
             compile_operation(
                 out,
                 bindings,
-                &intermediates,
-                c->tk
+                intermediates,
+                c->tk,
+                is_assignment_lhs
             );
         } else if (c->type == PATTERN_MEMBER) {
             compile_struct_member(
                 out,
                 bindings,
-                &intermediates,
-                c->tk
+                intermediates,
+                c->tk,
+                is_assignment_lhs
             );
         } else if (c->type == PATTERN_END_TERM) {
             if (emplace_stack.count != 0) {
@@ -916,11 +919,11 @@ struct intermediate_buffer compile_expression(
                     "literal...?\n");
                 exit(EXIT_FAILURE);
             }
-            /* We are either assigning or returning this multi-value, push it
-               to the stack. */
-            /* TODO: Don't push if it is the last term in the multi-value, to
-               save one redundant move command? */
-            compile_push(out, &intermediates);
+            if (!is_assignment_lhs) {
+                /* We are either assigning or returning this multi-value, push it
+                   to the stack. */
+                compile_push(out, intermediates);
+            }
         } else if (c->type == PATTERN_END_ARG) {
             struct emplace_info *em = buffer_top(emplace_stack);
             if (!em) {
@@ -929,20 +932,35 @@ struct intermediate_buffer compile_expression(
                     c->tk.row, c->tk.column);
                 exit(EXIT_FAILURE);
             }
-            compile_end_arg(out, &intermediates, em, c);
+            compile_end_arg(out, intermediates, em, c);
             em->args_handled += 1;
             if (em->args_handled >= em->args_total) {
                 int local_count = bindings->count - bindings->global_count;
-                compile_end_emplace(out, local_count, &intermediates, em, c);
+                compile_end_emplace(out, local_count, intermediates, em, c);
                 emplace_stack.count -= 1;
             }
         } else {
+            if (is_assignment_lhs) {
+                fprintf(stderr, "Error at line %d, %d: Got literal \"", c->tk.row, c->tk.column);
+                fputstr(c->tk.it, stderr);
+                fprintf(stderr, "\" on left hand side of an assignment.\n");
+                exit(EXIT_FAILURE);
+            }
             /* Some kind of opening operation, push it to the emplace stack. */
-            compile_begin_emplace(out, &intermediates, &emplace_stack, c);
+            compile_begin_emplace(out, intermediates, &emplace_stack, c);
         }
     }
 
     buffer_free(emplace_stack);
+}
+
+struct intermediate_buffer compile_expression(
+    struct instruction_buffer *out,
+    struct record_table *bindings,
+    struct pattern *in
+) {
+    struct intermediate_buffer intermediates = intermediates_start(bindings);
+    compile_expression_inner(out, bindings, in, &intermediates, false);
 
     return intermediates;
 }
@@ -1044,73 +1062,101 @@ void compile_assignment(
     struct pattern *lhs,
     struct pattern *rhs
 ) {
-    /* Do we want to compile the LHS first? Or the RHS? */
-    struct intermediate_buffer values = compile_expression(out, bindings, rhs);
+    /* Usually the order that we evaluate the LHS vs the RHS does not matter,
+       as long as both happen before the actual assignment of the RHS to the
+       locations specified on the LHS. In fact, usually the LHS is a no-op,
+       just a list of bindings to store to! There are cases where it does
+       matter, however; namely when the LHS is an array index, and the RHS
+       features that array. e.g.
+           var x := [1, 2];
+           var y := [3];
+           x[0], y = y[0], x;
+       When we compile the LHS and RHS of the last line, we clearly want the
+       RHS to be (3, [1, 2]), not (3, <magic pointer to x that could change>),
+       since this language is about data, not magic pointers to objects that
+       can change. This means we need to evaluate the RHS, to get a copy of x,
+       before we do the MAKE_UNIQUE operation on the LHS that will prepare x
+       for modification. Since in all other cases, it doesn't matter what order
+       we evaluate these, we always evaluate the RHS first. */
 
-    while (lhs->count > 0) {
-        if (values.count == 0) {
-            struct token *tk = &lhs->data[0].tk;
-            fprintf(stderr, "Error at line %d, %d: There are more values on "
-                "the left hrnd side of the assignment than on the right hand "
-                "side.\n", tk->row, tk->column);
-            exit(EXIT_FAILURE);
-        }
+    struct intermediate_buffer intermediates = compile_expression(out, bindings, rhs);
+    size_t rhs_count = intermediates.count;
+    size_t pre_lhs_local_count = intermediates.next_local_index;
+    /* We want to track how many locals from the RHS are still in use, so that
+       when the temporaries on the LHS are gone, we can start popping the RHS
+       temporaries too. */
+    size_t remaining_rhs_local_count = pre_lhs_local_count;
 
-        struct pattern_command *c = buffer_top(*lhs);
-        if (c->type != PATTERN_VALUE) {
-            fprintf(stderr, "Error at line %d, %d: The operator \"",
-                c->tk.row, c->tk.column);
-            fputstr(c->tk.it, stderr);
-            fprintf(stderr, "\" appeared on the left hand side of an "
-                "assignment statement. Pattern matching is not "
-                "implemented.\n");
-            exit(EXIT_FAILURE);
-        }
-        if (c->tk.id != TOKEN_ALPHANUM) {
-            fprintf(stderr, "Error at line %d, %d: The literal \"",
-                c->tk.row, c->tk.column);
-            fputstr(c->tk.it, stderr);
-            fprintf(stderr, "\" appeared on the left hand side of an "
-                "assignment statement. Pattern matching is not "
-                "implemented.\n");
-            exit(EXIT_FAILURE);
-        }
+    compile_expression_inner(out, bindings, lhs, &intermediates, true);
+    size_t lhs_count = intermediates.count - rhs_count;
 
-        struct ref ref;
-        struct record_entry *binding = convert_name(bindings, &c->tk, NULL, &ref);
+    if (lhs_count != rhs_count) {
+        struct token *tk = &lhs->data[0].tk;
+        fprintf(stderr, "Error at line %d, %d: There are %d values on the "
+            "left hand side of assignment, but %d on the right hand side.\n",
+            tk->row, tk->column, lhs_count, rhs_count);
+        exit(EXIT_FAILURE);
+    }
 
-        struct intermediate val = buffer_pop(values);
-        if (!type_eq(&binding->type, &val.type)) {
-            fprintf(stderr, "Error at line %d, %d: Tried to assign something "
-                "to \"", c->tk.row, c->tk.column);
-            fputstr(c->tk.it, stderr);
-            fprintf(stderr, "\", but the expression on the right hand side "
-                "had the wrong type.\n");
-            exit(EXIT_FAILURE);
-        }
+    for (int i = rhs_count - 1; i >= 0; i--) {
+        struct intermediate r = intermediates.data[i];
+        struct intermediate l = intermediates.data[rhs_count + i];
 
-        /* Only perform the assignment if the terms are different. */
-        if (val.ref.type != ref.type || val.ref.x != ref.x) {
-            compile_variable_decrements(out, ref, &binding->type, 0, true, false);
-            if (val.is_pointer) {
-                compile_copy(out, &values, ref, &val, false);
+        /* TODO: Store a token in each intermediate, representing the first
+           token of its subexpression? */
+        struct token *err_tk = &lhs->data[0].tk;
+        int err_row = err_tk->row;
+        int err_col = err_tk->column;
+        if (!type_eq(&l.type, &r.type)) {
+            fprintf(stderr, "Error at line %d, %d: ", err_row, err_col);
+            if (rhs_count == 1) {
+                fprintf(stderr, "Assignment had the wrong type.\n");
             } else {
-                compile_mov(out, ref, &val);
+                fprintf(stderr, "Assignment to term %d had the wrong type.\n", i);
+            }
+            exit(EXIT_FAILURE);
+        }
+
+        if (l.ref.type == REF_CONSTANT) {
+            fprintf(stderr, "Error at line %d, %d: ", err_row, err_col);
+            if (rhs_count == 1) {
+                fprintf(stderr, "A literal appeared on the left hand side of an assignment.\n");
+            } else {
+                fprintf(stderr, "A literal appeared in term %d on the left hand side of an assignment.\n", i);
             }
         }
 
-        if (lhs->count == 1 && values.count > 0) {
-            struct token *tk = &lhs->data[0].tk;
-            fprintf(stderr, "Error at line %d, %d: There are more values on "
-                "the right hand side of the assignment than on the left hand "
-                "side.\n", tk->row, tk->column);
-            exit(EXIT_FAILURE);
+        bool r_is_l = l.ref.type == r.ref.type && l.ref.x == r.ref.x;
+
+        /* Only do the assignment if the references are different, to avoid
+           pushing reference counts to 0 in confusion. */
+        if (!r_is_l) {
+            compile_variable_decrements(out, l.ref, &l.type, 0, true, false);
+            if (l.is_pointer) {
+                compile_store(out, l.ref, l.ref_offset, &intermediates, r);
+            } else {
+                compile_mov(out, l.ref, &r);
+            }
         }
 
-        lhs->count -= 1;
-
-        /* TODO: Test for multi-value commas and pop them? I don't know. */
+        /* Remove one of the LHS intermediates, in case it frees up a variable
+           that could be used for pointer offset silliness. */
+        pop_intermediate(&intermediates);
+        if (r.ref.type == REF_TEMPORARY) {
+            remaining_rhs_local_count -= 1;
+        }
+        /* Also remove from the RHS, if the LHS doesn't have any temporaries
+           anymore. */
+        /* Do it manually, without popping the intermediates, since otherwise
+           we'll lose track of the lhs intermediates. */
+        if (intermediates.next_local_index <= pre_lhs_local_count) {
+            intermediates.next_local_index = remaining_rhs_local_count;
+        }
     }
+
+    /* Popping intermediates doesn't actually do anything if you are going to
+       free them anyway. */
+    buffer_free(intermediates);
 }
 
 #endif

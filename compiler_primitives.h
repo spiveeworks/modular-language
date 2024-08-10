@@ -81,7 +81,7 @@ struct intermediate pop_intermediate(struct intermediate_buffer *intermediates) 
     return result;
 }
 
-struct ref push_intermediate(struct intermediate_buffer *intermediates, struct type ty) {
+struct ref push_intermediate_maybe_ptr(struct intermediate_buffer *intermediates, struct type ty, bool force_ptr) {
     struct ref result;
     result.type = REF_TEMPORARY;
     result.x = intermediates->next_local_index;
@@ -91,10 +91,14 @@ struct ref push_intermediate(struct intermediate_buffer *intermediates, struct t
     loc->type = ty;
     loc->alloc_size = ty.total_size;
     loc->ref = result;
-    loc->is_pointer = ty.connective == TYPE_RECORD || ty.connective == TYPE_TUPLE;
+    loc->is_pointer = force_ptr || ty.connective == TYPE_RECORD || ty.connective == TYPE_TUPLE;
     intermediates->next_local_index += 1;
 
     return result;
+}
+
+struct ref push_intermediate(struct intermediate_buffer *intermediates, struct type ty) {
+    return push_intermediate_maybe_ptr(intermediates, ty, false);
 }
 
 struct ref variable_index_ref(struct record_table *bindings, int ind) {
@@ -343,15 +347,17 @@ void realloc_temp_struct(
     pop_intermediate(values);
 }
 
-struct type compile_store(
+/* Stores an intermediate value inside a pointer, taking an offset if
+   necessary. IMPORTANT: make sure that you don't remove the intermediate from
+   the buffer until AFTER the store operation is complete, as compile_store may
+   allocate a new temporary to represent the offset version of the pointer. */
+void compile_store(
     struct instruction_buffer *out,
     struct ref to_ptr,
     int64 offset,
-    struct intermediate_buffer *intermediates
+    struct intermediate_buffer *intermediates,
+    struct intermediate val
 ) {
-    /* Don't pop yet, in case we need to make some more temporaries first. */
-    struct intermediate val = *buffer_top(*intermediates);
-
     enum operation_flags flags = 0;
     if (val.is_pointer) {
         if (val.type.connective != TYPE_TUPLE && val.type.connective != TYPE_RECORD) {
@@ -361,6 +367,8 @@ struct type compile_store(
 
         struct ref offset_ptr = push_intermediate(intermediates, val.type);
 
+        /* Can we skip this if the offset is 0? Does compile_copy clobber the
+           pointer, or something? */
         struct instruction *instr = buffer_addn(*out, 1);
         instr->op = OP_POINTER_OFFSET;
         instr->output = offset_ptr;
@@ -392,10 +400,21 @@ struct type compile_store(
             "implemented for arrays and 64 bit integers.\n");
         exit(EXIT_FAILURE);
     }
+}
 
-    /* Pop AFTER storing, in case we needed to contrive a temporary pointer
-       value. */
+/* like compile_store, but stores the top intermediate, and pops it after. */
+struct type compile_store_top(
+    struct instruction_buffer *out,
+    struct ref to_ptr,
+    int64 offset,
+    struct intermediate_buffer *intermediates
+) {
+    struct intermediate val = *buffer_top(*intermediates);
+
+    compile_store(out, to_ptr, offset, intermediates, val);
+
     pop_intermediate(intermediates);
+
     return val.type;
 }
 
@@ -423,7 +442,8 @@ void compile_operation(
     struct instruction_buffer *out,
     struct record_table *bindings,
     struct intermediate_buffer *intermediates,
-    struct token operation
+    struct token operation,
+    bool is_assignment_lhs
 ) {
     struct operator_info *op = NULL;
     for (int i = 0; i < ARRAY_LENGTH(binary_ops); i++) {
@@ -472,7 +492,36 @@ void compile_operation(
             exit(EXIT_FAILURE);
         }
         struct type *inner = val1.type.inner;
-        if (inner->connective == TYPE_ARRAY) {
+        if (is_assignment_lhs) {
+            if (val1.is_pointer) {
+                /* Pointer to array, make it unique where it is, while also
+                   extracting that unique copy as a scalar. */
+                struct ref tmp;
+                tmp.type = REF_TEMPORARY;
+                tmp.x = intermediates->next_local_index;
+
+                struct instruction *fst = buffer_addn(*out, 1);
+                fst->op = OP_POINTER_LOAD_MAKE_UNIQUE;
+                fst->output = tmp;
+                fst->arg1 = val1.ref;
+                fst->arg2.type = REF_CONSTANT;
+                fst->arg2.x = val1.ref_offset;
+                fst->flags = 0;
+
+                /* Now offset into the scalar version. */
+                result.op = OP_ARRAY_OFFSET;
+                result.arg1 = tmp;
+            } else {
+                /* Scalar array, make it mutable, and then offset it. */
+                result.op = OP_ARRAY_OFFSET_MAKE_UNIQUE;
+            }
+        } else if (val1.is_pointer) {
+            fprintf(stderr, "Error: Got a pointer to an array, that wasn't on the LHS of an assignment?\n");
+            exit(EXIT_FAILURE);
+        } else if (inner->connective == TYPE_RECORD || inner->connective == TYPE_TUPLE) {
+            /* We want to read a struct, so get the pointer to it. */
+            result.op = OP_ARRAY_OFFSET;
+        } else if (inner->connective == TYPE_ARRAY) {
             result.flags = OP_SHARED_BUFF;
         } else if (inner->connective == TYPE_INT) {
             result.flags = OP_64BIT;
@@ -481,14 +530,18 @@ void compile_operation(
                appropriately. */
             result.flags = OP_64BIT;
         } else {
-            /* Not a scalar, so give a pointer instead. TODO: Break this up
-               into some kind of MUL ADD with more steps, to stop relying on
-               reflection to index arrays?? */
-            result.op = OP_ARRAY_OFFSET;
+            fprintf(stderr, "Error: Unknown connective %d?\n", inner->connective);
         }
 
         result_type = *val1.type.inner;
     } else if (op->opcode == OP_ARRAY_CONCAT) {
+        if (is_assignment_lhs) {
+            fprintf(stderr, "Error at line %d, %d: Got binary operator \"", operation.row, operation.column);
+            fputstr(operation.it, stderr);
+            fprintf(stderr, "\" on left hand side of an assignment.\n");
+            exit(EXIT_FAILURE);
+        }
+
         if (val1.type.connective != TYPE_ARRAY || val2.type.connective != TYPE_ARRAY) {
             fprintf(stderr, "Error: Arguments to ++ operator must be "
                 "arrays.\n");
@@ -503,6 +556,13 @@ void compile_operation(
 
         result_type = val1.type;
     } else {
+        if (is_assignment_lhs) {
+            fprintf(stderr, "Error at line %d, %d: Got binary operator \"", operation.row, operation.column);
+            fputstr(operation.it, stderr);
+            fprintf(stderr, "\" on left hand side of an assignment.\n");
+            exit(EXIT_FAILURE);
+        }
+
         /* Casing all the scalar connectives sounds annoying. Maybe I should
            make the connective "scalar", or work out some bit mask trick to
            test them all in one go. */
@@ -526,7 +586,7 @@ void compile_operation(
     /* if (val1.ref.type == REF_TEMPORARY) destroy_type(&val1.type); */
     /* if (val2.ref.type == REF_TEMPORARY) destroy_type(&val2.type); */
 
-    result.output = push_intermediate(intermediates, result_type);
+    result.output = push_intermediate_maybe_ptr(intermediates, result_type, is_assignment_lhs);
 
     buffer_push(*out, result);
 }
@@ -535,7 +595,8 @@ void compile_struct_member(
     struct instruction_buffer *out,
     struct record_table *bindings,
     struct intermediate_buffer *intermediates,
-    struct token member_tk
+    struct token member_tk,
+    bool is_assignment_lhs
 ) {
     struct intermediate *it = buffer_top(*intermediates);
     struct type *member_ty = NULL;
@@ -582,7 +643,7 @@ void compile_struct_member(
         exit(EXIT_FAILURE);
     }
 
-    if (member_ty->connective == TYPE_INT || member_ty->connective == TYPE_ARRAY) {
+    if (!is_assignment_lhs && (member_ty->connective == TYPE_INT || member_ty->connective == TYPE_ARRAY)) {
         enum operation_flags flags = 0;
         if (member_ty->connective == TYPE_ARRAY) flags = OP_SHARED_BUFF;
         else flags = OP_64BIT;
@@ -693,6 +754,7 @@ void compile_struct_member(
            take offsets, so just update the offset. */
         it->ref_offset = offset;
         it->type = *member_ty;
+        it->is_pointer = true;
     }
 }
 
