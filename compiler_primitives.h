@@ -50,7 +50,7 @@ struct intermediate {
     struct ref ref;
     struct type type;
     size_t ref_offset;
-    /* bool is_pointer; */
+    bool is_pointer;
     bool owns_stack_memory;
     bool stack_offset_known;
     size_t alloc_size;
@@ -91,6 +91,7 @@ struct ref push_intermediate(struct intermediate_buffer *intermediates, struct t
     loc->type = ty;
     loc->alloc_size = ty.total_size;
     loc->ref = result;
+    loc->is_pointer = ty.connective == TYPE_RECORD || ty.connective == TYPE_TUPLE;
     intermediates->next_local_index += 1;
 
     return result;
@@ -147,6 +148,10 @@ void compile_value_token(
         *loc = (struct intermediate){0};
 
         convert_name(bindings, in, &loc->type, &loc->ref);
+
+        if (loc->type.connective == TYPE_RECORD || loc->type.connective == TYPE_TUPLE) {
+            loc->is_pointer = true;
+        }
     } else if (in->id == TOKEN_NUMERIC) {
         int64 value = integer_from_string(in->it);
 
@@ -163,19 +168,20 @@ void compile_value_token(
     }
 }
 
-void compile_mov(
+void compile_mov_ref(
     struct instruction_buffer *out,
     struct ref to,
     struct ref from,
-    struct type *ty
+    struct type *ty,
+    bool force_pointer
 ) {
     enum operation_flags flags = 0;
-    if (ty->connective == TYPE_INT && ty->word_size == 3) {
+    if (force_pointer || ty->connective == TYPE_TUPLE || ty->connective == TYPE_RECORD) {
+        flags = OP_64BIT;
+    } else if (ty->connective == TYPE_INT && ty->word_size == 3) {
         flags = OP_64BIT;
     } else if (ty->connective == TYPE_ARRAY) {
         flags = OP_SHARED_BUFF;
-    } else if (ty->connective == TYPE_TUPLE || ty->connective == TYPE_RECORD) {
-        flags = OP_64BIT;
     } else if (ty->connective == TYPE_PROCEDURE) {
         flags = OP_64BIT;
     } else {
@@ -190,6 +196,14 @@ void compile_mov(
     instr->output = to;
     instr->arg1 = from;
     instr->arg2.type = REF_NULL;
+}
+
+void compile_mov(
+    struct instruction_buffer *out,
+    struct ref to,
+    struct intermediate *from
+) {
+    compile_mov_ref(out, to, from->ref, &from->type, from->is_pointer);
 }
 
 /* When we write a struct to a location, we then need to increment some of the
@@ -279,6 +293,56 @@ void compile_copy(
     if (pushed_new) pop_intermediate(intermediates);
 }
 
+/* Move a struct backwards in the stack, in cases where a temporary was
+   constructed and immediately indexed. */
+void realloc_temp_struct(
+    struct instruction_buffer *out,
+    struct intermediate_buffer *values,
+    struct intermediate *val
+) {
+    if (val->ref_offset > 0) {
+        /* Move the data to the left. */
+        struct ref offset_ptr = push_intermediate(values, val->type);
+        struct instruction *instrs = buffer_addn(*out, 2);
+        instrs[0].op = OP_POINTER_OFFSET;
+        instrs[0].flags = 0;
+        instrs[0].output = offset_ptr;
+        instrs[0].arg1 = val->ref;
+        instrs[0].arg2.type = REF_CONSTANT;
+        instrs[0].arg2.x = val->ref_offset;
+
+        if (val->type.total_size <= val->ref_offset) {
+            instrs[1].op = OP_POINTER_COPY;
+        } else {
+            instrs[1].op = OP_POINTER_COPY_OVERLAPPING;
+        }
+        instrs[1].flags = 0;
+        instrs[1].output = val->ref;
+        instrs[1].arg1 = offset_ptr;
+        instrs[1].arg2.type = REF_CONSTANT;
+        instrs[1].arg2.x = val->type.total_size;
+
+        pop_intermediate(values);
+    }
+    /* Free the unused part. */
+    struct ref offset_ptr = push_intermediate(values, type_empty_tuple);
+    struct instruction *instrs = buffer_addn(*out, 2);
+    instrs[0].op = OP_POINTER_OFFSET;
+    instrs[0].flags = 0;
+    instrs[0].output = offset_ptr;
+    instrs[0].arg1 = val->ref;
+    instrs[0].arg2.type = REF_CONSTANT;
+    instrs[0].arg2.x = val->type.total_size;
+
+    instrs[1].op = OP_STACK_FREE;
+    instrs[1].flags = 0;
+    instrs[1].output.type = REF_NULL;
+    instrs[1].arg1 = offset_ptr;
+    instrs[1].arg2.type = REF_NULL;
+
+    pop_intermediate(values);
+}
+
 struct type compile_store(
     struct instruction_buffer *out,
     struct ref to_ptr,
@@ -289,7 +353,25 @@ struct type compile_store(
     struct intermediate val = *buffer_top(*intermediates);
 
     enum operation_flags flags = 0;
-    if (val.type.connective == TYPE_INT && val.type.word_size == 3) {
+    if (val.is_pointer) {
+        if (val.type.connective != TYPE_TUPLE && val.type.connective != TYPE_RECORD) {
+            fprintf(stderr, "Error: Tried to store a pointer that was pointing to a scalar?\n");
+            exit(EXIT_FAILURE);
+        }
+
+        struct ref offset_ptr = push_intermediate(intermediates, val.type);
+
+        struct instruction *instr = buffer_addn(*out, 1);
+        instr->op = OP_POINTER_OFFSET;
+        instr->output = offset_ptr;
+        instr->arg1 = to_ptr;
+        instr->arg2.type = REF_CONSTANT;
+        instr->arg2.x = offset;
+
+        compile_copy(out, intermediates, offset_ptr, &val, false);
+
+        pop_intermediate(intermediates);
+    } else if (val.type.connective == TYPE_INT && val.type.word_size == 3) {
         struct instruction *instr = buffer_addn(*out, 1);
         instr->op = OP_POINTER_STORE;
         instr->flags = OP_64BIT;
@@ -305,19 +387,6 @@ struct type compile_store(
         instr->arg1.type = REF_CONSTANT;
         instr->arg1.x = offset;
         instr->arg2 = val.ref;
-    } else if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
-        struct ref offset_ptr = push_intermediate(intermediates, val.type);
-
-        struct instruction *instr = buffer_addn(*out, 1);
-        instr->op = OP_POINTER_OFFSET;
-        instr->output = offset_ptr;
-        instr->arg1 = to_ptr;
-        instr->arg2.type = REF_CONSTANT;
-        instr->arg2.x = offset;
-
-        compile_copy(out, intermediates, offset_ptr, &val, false);
-
-        pop_intermediate(intermediates);
     } else {
         fprintf(stderr, "Error: Store instructions are only "
             "implemented for arrays and 64 bit integers.\n");
@@ -344,7 +413,7 @@ void compile_push(
     struct intermediate *val = buffer_top(*intermediates);
     if (val->ref.type != REF_TEMPORARY) {
         struct ref to = {REF_TEMPORARY, intermediates->next_local_index};
-        compile_mov(out, to, val->ref, &val->type);
+        compile_mov(out, to, val);
         val->ref = to;
         intermediates->next_local_index += 1;
     }
@@ -789,7 +858,7 @@ void compile_proc_call(
         for (int i = 0; i < outputs.count; i++) {
             struct ref to = {REF_TEMPORARY, intermediates->next_local_index};
             struct ref from = {REF_TEMPORARY, intermediates->next_local_index + 1};
-            compile_mov(out, to, from, &outputs.data[i]);
+            compile_mov_ref(out, to, from, &outputs.data[i], false);
             push_intermediate(intermediates, outputs.data[i]);
         }
     } else {
@@ -912,6 +981,10 @@ void compile_return(
                RET 0, not RET 1. */
             val_count -= 1;
         } else {
+            if (intermediates->data[0].is_pointer) {
+                fprintf(stderr, "Error: tried to return a pointer that was pointing to a scalar?\n");
+                exit(EXIT_FAILURE);
+            }
             if (bindings->out_ptr_count != 0) {
                 /* TODO: Better error message for when this is actually
                    reachable? */

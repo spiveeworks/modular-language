@@ -621,7 +621,7 @@ void compile_begin_emplace(
         next_emplace->size = 0;
 
         struct type array_type = type_array_of(type_int64);
-        struct ref array_temporary = push_intermediate(intermediates, array_type);
+        push_intermediate(intermediates, array_type);
 
         next_emplace->pointer_intermediate_index = intermediates->count - 1;
     } else if (c->type == PATTERN_STRUCT) {
@@ -629,7 +629,7 @@ void compile_begin_emplace(
         buffer_change_count(*out, 1);
         next_emplace->size = 0;
 
-        struct ref array_temporary = push_intermediate(intermediates, type_empty_tuple);
+        push_intermediate(intermediates, type_empty_tuple);
         struct intermediate *val = buffer_top(*intermediates);
         val->owns_stack_memory = true;
 
@@ -670,7 +670,7 @@ void compile_begin_emplace(
                    of the procedure handle itself, so move the procedure
                    forward, and use the old spot for the memory register
                    instead. */
-                compile_mov(out, temp_memory, proc_val->ref, &proc_val->type);
+                compile_mov(out, temp_memory, proc_val);
                 proc_val->ref.x += 1;
                 temp_memory.x -= 1;
             }
@@ -1001,67 +1001,27 @@ void assert_match_pattern(
             new_var.x = global_index - bindings->global_count;
         }
 
-        if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
-            if (val.owns_stack_memory) {
-                if (val.type.total_size < val.alloc_size) {
-                    /* A struct literal has been constructed and then indexed
-                       into. We know all the other fields were deinitialized as
-                       we went, so all we need to do now is defragment the
-                       stack a little. */
-                    if (val.ref_offset > 0) {
-                        /* Move the data to the left. */
-                        struct ref offset_ptr = push_intermediate(values, val.type);
-                        struct instruction *instrs = buffer_addn(*out, 2);
-                        instrs[0].op = OP_POINTER_OFFSET;
-                        instrs[0].flags = 0;
-                        instrs[0].output = offset_ptr;
-                        instrs[0].arg1 = val.ref;
-                        instrs[0].arg2.type = REF_CONSTANT;
-                        instrs[0].arg2.x = val.ref_offset;
-
-                        if (val.type.total_size <= val.ref_offset) {
-                            instrs[1].op = OP_POINTER_COPY;
-                        } else {
-                            instrs[1].op = OP_POINTER_COPY_OVERLAPPING;
-                        }
-                        instrs[1].flags = 0;
-                        instrs[1].output = val.ref;
-                        instrs[1].arg1 = offset_ptr;
-                        instrs[1].arg2.type = REF_CONSTANT;
-                        instrs[1].arg2.x = val.type.total_size;
-
-                        pop_intermediate(values);
-                    }
-                    /* Free the unused part. */
-                    struct ref offset_ptr = push_intermediate(values, type_empty_tuple);
-                    struct instruction *instrs = buffer_addn(*out, 2);
-                    instrs[0].op = OP_POINTER_OFFSET;
-                    instrs[0].flags = 0;
-                    instrs[0].output = offset_ptr;
-                    instrs[0].arg1 = val.ref;
-                    instrs[0].arg2.type = REF_CONSTANT;
-                    instrs[0].arg2.x = val.type.total_size;
-
-                    instrs[1].op = OP_STACK_FREE;
-                    instrs[1].flags = 0;
-                    instrs[1].output.type = REF_NULL;
-                    instrs[1].arg1 = offset_ptr;
-                    instrs[1].arg2.type = REF_NULL;
-
-                    pop_intermediate(values);
-                } /* else steal the memory and use it in-place. */
-
-                /* The memory is where we need it, now we just need to turn the
-                   pointer into a local. */
-                compile_mov(out, new_var, val.ref, &val.type);
-            } else {
-                /* Allocate some new memory and copy the value in. */
-                /* Is it okay to pass values into this thing as our
-                   intermediate buffer? */
-                compile_copy(out, values, new_var, &val, true);
-            }
+        if (!val.is_pointer) {
+            compile_mov(out, new_var, &val);
+        } else if (!val.owns_stack_memory) {
+            /* Is a pointer, but is not owned. Allocate some new memory and
+               copy the value in. */
+            /* Is it okay to pass values into this thing as our
+               intermediate buffer? */
+            compile_copy(out, values, new_var, &val, true);
         } else {
-            compile_mov(out, new_var, val.ref, &val.type);
+            /* The value is a temporary that was already built on the stack.
+               Just take ownership of that memory, in a new binding. */
+            if (val.type.total_size < val.alloc_size) {
+                /* A struct literal has been constructed and then indexed
+                   into. Defragment the now-unused beginning and end of the
+                   allocation. */
+                realloc_temp_struct(out, values, &val);
+            }
+
+            /* The memory is where we need it, now we just need to turn the
+               pointer into a local. */
+            compile_mov(out, new_var, &val);
         }
 
         if (pattern->count == 1 && values->count > 0) {
@@ -1132,10 +1092,10 @@ void compile_assignment(
         /* Only perform the assignment if the terms are different. */
         if (val.ref.type != ref.type || val.ref.x != ref.x) {
             compile_variable_decrements(out, ref, &binding->type, 0, true, false);
-            if (val.type.connective == TYPE_TUPLE || val.type.connective == TYPE_RECORD) {
+            if (val.is_pointer) {
                 compile_copy(out, &values, ref, &val, false);
             } else {
-                compile_mov(out, ref, val.ref, &val.type);
+                compile_mov(out, ref, &val);
             }
         }
 
