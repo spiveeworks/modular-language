@@ -372,6 +372,8 @@ enum operation {
     OP_POINTER_LOAD_MAKE_UNIQUE,
     OP_POINTER_INCREMENT_REFCOUNT,
     OP_POINTER_DECREMENT_REFCOUNT,
+
+    OP_ASSERT,
 };
 
 enum operation_flags {

@@ -707,6 +707,14 @@ void continue_execution(
               shared_buff_decrement(buff->ptr);
               break;
           }
+        case OP_ASSERT:
+          {
+              if (arg1 == 0) {
+                  fprintf(stderr, "Error: Assertion failed.\n");
+                  exit(EXIT_FAILURE);
+              }
+              break;
+          }
         default:
             fprintf(stderr, "Error: Tried to execute unknown opcode %d.\n",
                 next->op);

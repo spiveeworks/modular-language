@@ -18,6 +18,7 @@
 #include "expressions.h"
 #include "statements.h"
 #include "interpreter.h"
+#include "builtins.h"
 
 void print_ref(struct ref ref) {
     switch (ref.type) {
@@ -216,6 +217,8 @@ int main(int argc, char **argv) {
     struct call_stack call_stack = {0};
     call_stack.data = stack_create(1 << 20); /* A megabyte of memory, why not? */
 
+    add_builtins(&bindings, &procedures, &call_stack);
+
     struct statement_buffer statements = {0};
 
     while (true) {
@@ -240,15 +243,7 @@ int main(int argc, char **argv) {
                 disassemble_instructions(item.instructions);
             }
         } else if (item.type == ITEM_PROCEDURE) {
-            struct procedure *p = buffer_addn(procedures, 1);
-            p->instructions = item.instructions;
-
-            buffer_push(bindings, item.proc_binding);
-            bindings.global_count = bindings.count;
-
-            struct variable_data *var = buffer_addn(call_stack.vars, 1);
-            var->value.val64 = procedures.count - 1;
-            call_stack.vars.global_count = bindings.global_count;
+            bind_procedure(&bindings, &procedures, &call_stack, item.proc_binding, item.instructions);
         } else if (item.type == ITEM_NULL) {
             break;
         } else {

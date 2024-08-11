@@ -7,16 +7,19 @@ procedure g(x: Int, y: Int) -> Int {
 }
 
 y := f(g(3, 1), 5);
+assert(y == 100);
 
 function h(x: Int, c: Int) := x * y + c;
 
-z := h(9, y);
+assert(h(9, y) == 1000);
 
 function j(x: Int) := f(x, x);
 
 w := j(3);
+assert(w == 18);
 
 function double_array(xs: [Int]) := xs ++ xs;
 
 doubled := double_array([1, 2, 3]);
+assert(doubled[4] == 2);
 
